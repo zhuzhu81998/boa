@@ -15,6 +15,7 @@
 //! [spec]: https://tc39.es/ecma262/#sec-symbol-value
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol
 
+// HEHE
 #![deny(
     unsafe_op_in_unsafe_fn,
     clippy::undocumented_unsafe_blocks,
