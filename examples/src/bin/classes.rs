@@ -9,6 +9,7 @@ use boa_engine::{
 };
 use boa_gc::{Finalize, Trace};
 use boa_runtime::Console;
+// Second HAHA
 
 // We create a new struct that is going to represent a person.
 //

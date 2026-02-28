@@ -5,6 +5,7 @@
 //! of the [`boa_engine`] API.
 
 // You can execute this example with `cargo run --example gcd`
+// AMKCREKREJFREJFREL
 
 use boa_engine::{Context, Module, js_string};
 use boa_parser::Source;
