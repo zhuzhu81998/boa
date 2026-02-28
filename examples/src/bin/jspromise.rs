@@ -3,6 +3,8 @@ use boa_engine::{
     builtins::promise::PromiseState, js_string, object::builtins::JsPromise,
 };
 
+// HEHEHEHEHHEHE
+
 // Simulate an API call that returns a Promise
 async fn simulate_api_call(success: bool, delay_ms: u64) -> JsResult<JsValue> {
     // simulate network delay
