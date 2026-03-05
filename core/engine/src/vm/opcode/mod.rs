@@ -1,8 +1,8 @@
 #![allow(clippy::inline_always)]
 #![allow(clippy::doc_markdown)]
 use crate::{
-    Context,
-    vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
+    Context, JsValue,
+    vm::completion_record::{CompletionRecord, IntoCompletionRecord},
 };
 use args::{Argument, read};
 use std::ops::ControlFlow;
@@ -454,6 +454,38 @@ macro_rules! generate_opcodes {
             }
         )*
 
+        type OpcodeHandlerTailCall = unsafe fn(&mut Context, usize) -> CompletionRecord;
+
+        const OPCODE_HANDLERS_TAIL: [OpcodeHandlerTailCall; 256] = {
+            [
+                $(
+                    paste::paste! { [<handle_ $Variant:snake _tail>] },
+                )*
+            ]
+        };
+
+        $(
+            paste::paste! {
+                #[inline(always)]
+                #[allow(unused_parens)]
+                unsafe fn [<handle_ $Variant:snake _tail>](
+                    context: &mut Context,
+                    pc: usize,
+                ) -> CompletionRecord {
+                    let bytes = &context.vm.frame.code_block.bytecode.bytecode;
+                    let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+                    context.vm.frame_mut().pc = next_pc as u32;
+                    let result = $Variant::operation(args, context);
+
+                    // This match MUST be the last expression — both arms in tail position
+                    match IntoCompletionRecord::into_completion_record(result, context) {
+                        ControlFlow::Continue(()) => context.dispatch_next(),
+                        ControlFlow::Break(value) => value,
+                    }
+                }
+            }
+        )*
+
         $(
             $(
                 struct $Variant {}
@@ -529,6 +561,41 @@ impl Context {
 
         OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget)
     }
+
+    #[inline(always)]
+    pub(crate) unsafe fn dispatch_next(&mut self) -> CompletionRecord {
+        let pc = self.vm.frame.pc as usize;
+        match self.vm.frame.code_block.bytecode.bytecode.get(pc) {
+            Some(&byte) => {
+                let opcode = Opcode::decode(byte);
+                OPCODE_HANDLERS_TAIL[opcode as usize](self, pc)
+            }
+            None => CompletionRecord::Normal(JsValue::undefined()),
+        }
+    }
+
+    // #[inline(always)]
+    // unsafe fn dispatch_next_budget(&mut self) -> CompletionRecord {
+    //     // Fetch next bytecode
+    //     match self
+    //         .vm
+    //         .frame
+    //         .code_block
+    //         .bytecode
+    //         .bytecode
+    //         .get(self.vm.frame.pc as usize)
+    //     {
+    //         Some(&byte) => {
+    //             let opcode = Opcode::decode(byte);
+    //             // Tail-call into the next handler
+    //             OPCODE_HANDLERS_BUDGET[opcode as usize](self)
+    //         }
+    //         None => {
+    //             // End of bytecode — return normally
+    //             CompletionRecord::Normal(JsValue::undefined())
+    //         }
+    //     }
+    // }
 }
 
 /// Iterator over the instructions in the compact bytecode.
