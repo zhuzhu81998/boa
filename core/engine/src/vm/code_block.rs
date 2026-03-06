@@ -336,7 +336,7 @@ impl CodeBlock {
     /// Modifies the `pc` to point to the next instruction.
     ///
     /// Returns an empty `String` if no operands are present.
-    pub(crate) fn instruction_operands(&self, instruction: &Instruction) -> String {
+    pub(crate) fn instruction_operands(&self, instruction: &Instruction<'_>) -> String {
         match instruction {
             Instruction::SetRegisterFromAccumulator { dst }
             | Instruction::PopIntoRegister { dst }
@@ -897,6 +897,7 @@ impl CodeBlock {
             | Instruction::Reserved52
             | Instruction::Reserved53
             | Instruction::Reserved54 => unreachable!("Reserved opcodes are unreachable"),
+            Instruction::__PhantomInstruction(_) => unreachable!(),
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use thin_vec::ThinVec;
 
 use super::{Address, RegisterOperand, VaryingOperand};
@@ -32,6 +34,29 @@ unsafe impl Readable for (u16, u16, u16, u16) {}
 unsafe impl Readable for (u32, u32, u32, u32) {}
 unsafe impl Readable for (u32, u32, u32, u32, u32) {}
 
+/// A lightweight view into a contiguous buffer containing fixed-size arguments.
+///
+/// The struct does not own the memory. It simply describes where the buffer
+/// starts, how large each element is, and how many elements are present.
+#[derive(Debug)]
+pub(crate) struct BufferView<'a, T> {
+    /// pointer + length of the buffer containing the arguments
+    bytes: &'a [u8],
+
+    /// keep track of the type T for tracking the element size.
+    _marker: PhantomData<T>,
+}
+
+impl<'a, T> BufferView<'a, T> {
+    /// Create a [`BufferView`] from a pre-encoded byte slice.
+    pub(crate) fn from_bytes(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            _marker: PhantomData::<T>,
+        }
+    }
+}
+
 #[inline(always)]
 #[track_caller]
 /// Read a value of type T from the byte slice at the given offset.
@@ -57,13 +82,13 @@ unsafe fn read_unchecked<T: Readable>(bytes: &[u8], offset: usize) -> T {
     unsafe { bytes.as_ptr().add(offset).cast::<T>().read_unaligned() }
 }
 
-pub(crate) trait Argument: Sized + std::fmt::Debug {
+pub(crate) trait Argument<'a>: Sized + std::fmt::Debug {
     /// Encode the argument into a byte slice
     fn encode(self, bytes: &mut Vec<u8>);
 
     /// Decode the argument from a byte slice
     /// Returns the decoded argument and the new position after reading
-    fn decode(bytes: &[u8], pos: usize) -> (Self, usize);
+    fn decode(bytes: &'a [u8], pos: usize) -> (Self, usize);
 }
 
 #[inline(always)]
@@ -109,7 +134,7 @@ fn write_f64(bytes: &mut Vec<u8>, value: f64) {
     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
 }
 
-impl<T: Argument> Argument for ThinVec<T> {
+impl<'a, T: Argument<'a>> Argument<'a> for ThinVec<T> {
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.len() as u32);
         for arg in self {
@@ -117,7 +142,8 @@ impl<T: Argument> Argument for ThinVec<T> {
         }
     }
 
-    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+    /// This allocates!!!
+    fn decode(bytes: &'a [u8], pos: usize) -> (Self, usize) {
         let (len, mut pos) = read::<u32>(bytes, pos);
         let total_len = len as usize;
         let mut result = ThinVec::with_capacity(total_len);
@@ -130,7 +156,7 @@ impl<T: Argument> Argument for ThinVec<T> {
     }
 }
 
-impl Argument for () {
+impl Argument<'_> for () {
     fn encode(self, _: &mut Vec<u8>) {}
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
@@ -138,7 +164,7 @@ impl Argument for () {
     }
 }
 
-impl Argument for VaryingOperand {
+impl Argument<'_> for VaryingOperand {
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
     }
@@ -149,7 +175,7 @@ impl Argument for VaryingOperand {
     }
 }
 
-impl Argument for RegisterOperand {
+impl Argument<'_> for RegisterOperand {
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
     }
@@ -160,7 +186,7 @@ impl Argument for RegisterOperand {
     }
 }
 
-impl Argument for Address {
+impl Argument<'_> for Address {
     #[inline(always)]
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
@@ -173,9 +199,28 @@ impl Argument for Address {
     }
 }
 
+impl<'a, T: Argument<'a>> Argument<'a> for BufferView<'a, T> {
+    fn encode(self, bytes: &mut Vec<u8>) {
+        write_u32(bytes, self.bytes.len() as u32);
+        bytes.extend_from_slice(self.bytes);
+    }
+
+    /// allocate-free get for byte slices
+    fn decode(bytes: &'a [u8], pos: usize) -> (Self, usize) {
+        let (byte_len, pos) = read::<u32>(bytes, pos);
+        let byte_len = byte_len as usize;
+        let slice = &bytes[pos..pos + byte_len];
+        let view = BufferView {
+            bytes: slice,
+            _marker: PhantomData::<T>,
+        };
+        (view, pos + byte_len)
+    }
+}
+
 macro_rules! impl_argument_for_tuple {
     ($( $i: ident  $t: ident ),*) => {
-        impl<$( $t: Argument, )*> Argument for ($( $t, )*) {
+        impl<'a, $( $t: Argument<'a>, )*> Argument<'a> for ($( $t, )*) {
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 let ($($i, )*) = self;
@@ -183,7 +228,7 @@ macro_rules! impl_argument_for_tuple {
             }
 
             #[inline(always)]
-            fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+            fn decode(bytes: &'a [u8], pos: usize) -> (Self, usize) {
                 $( let ($i, pos) = $t::decode(bytes, pos); )*
                 (($($i,)*), pos)
             }
@@ -200,7 +245,7 @@ impl_argument_for_tuple!(a A, b B, c C, d D, e E);
 macro_rules! impl_argument_for_int {
     ($( $t: ty )*) => {
         $(
-        impl Argument for $t {
+        impl Argument<'_> for $t {
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 paste::paste! {
