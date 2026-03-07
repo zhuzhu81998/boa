@@ -1,5 +1,3 @@
-use thin_vec::thin_vec;
-
 use crate::{
     bytecompiler::{ByteCompiler, Label, Register},
     js_string,
@@ -8,16 +6,21 @@ use crate::{
 
 impl ByteCompiler<'_> {
     pub(crate) fn generator_next(&mut self, value: &Register, resume_kind: &Register) {
-        // NOTE: +4 to jump past the index operand.
-        let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
-        self.bytecode_emitter.emit_jump_table(
-            resume_kind.index(),
-            thin_vec![
-                Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
-                Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
-                                     // GeneratorResumeKind::Return is the default case
-            ],
-        );
+        let addresses_handle = self
+            .bytecode_emitter
+            .operands_arena_mut()
+            .push_address_operands(
+                vec![
+                    Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
+                    Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
+                                         // GeneratorResumeKind::Return is the default case
+                ]
+                .into_boxed_slice(),
+            );
+
+        self.bytecode_emitter
+            .emit_jump_table(resume_kind.index(), addresses_handle);
+
         // Return branch
         self.bytecode_emitter.emit_set_accumulator(value.variable());
         self.bytecode_emitter.emit_re_throw();
@@ -32,7 +35,8 @@ impl ByteCompiler<'_> {
 
         self.patch_jump(end);
         self.bytecode_emitter
-            .patch_jump_table(jump_table_index, &[normal, throw]);
+            .operands_arena_mut()
+            .patch_address_operands(addresses_handle, &[normal, throw]);
     }
 
     pub(crate) fn generator_delegate_next(
@@ -46,16 +50,19 @@ impl ByteCompiler<'_> {
         self.bytecode_emitter
             .emit_iterator_pop(iterator.variable(), next.variable());
 
-        // NOTE: +4 to jump past the index operand.
-        let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
-        self.bytecode_emitter.emit_jump_table(
-            resume_kind.index(),
-            thin_vec![
-                Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
-                Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
-                                     // GeneratorResumeKind::Return is the default case
-            ],
-        );
+        let addresses_handle = self
+            .bytecode_emitter
+            .operands_arena_mut()
+            .push_address_operands(
+                vec![
+                    Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
+                    Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
+                                         // GeneratorResumeKind::Return is the default case
+                ]
+                .into_boxed_slice(),
+            );
+        self.bytecode_emitter
+            .emit_jump_table(resume_kind.index(), addresses_handle);
 
         // GeneratorResumeKind::Return
         let name_index = self.get_or_insert_string(js_string!("return"));
@@ -114,7 +121,8 @@ impl ByteCompiler<'_> {
         self.pop_into_register(value);
 
         self.bytecode_emitter
-            .patch_jump_table(jump_table_index, &[normal, throw]);
+            .operands_arena_mut()
+            .patch_address_operands(addresses_handle, &[normal, throw]);
         self.patch_jump(return_jump);
         self.patch_jump(normal_jump);
 
@@ -141,7 +149,8 @@ impl ByteCompiler<'_> {
         self.patch_jump(not_throw);
 
         // resume_kind is not throw. Try to update the iterator result
-        self.bytecode_emitter.emit_iterator_update_result(value.variable());
+        self.bytecode_emitter
+            .emit_iterator_update_result(value.variable());
 
         // `value` should contain a boolean with `iterator.done()` at this point.
         // skip pop if the iterator is not done yet

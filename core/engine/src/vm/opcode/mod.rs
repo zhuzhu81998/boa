@@ -4,7 +4,7 @@ use crate::{
     Context,
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
-use args::{Argument, read};
+use args::Argument;
 use std::{marker::PhantomData, ops::ControlFlow};
 use thin_vec::ThinVec;
 
@@ -160,21 +160,6 @@ impl BytecodeEmitter {
         self.bytes[pos + 4] = bytes[3];
     }
 
-    /// Patch the jump instruction at the given label with jump table addresses.
-    pub(crate) fn patch_jump_table(&mut self, label: Address, patch: &[Address]) {
-        let length_offset = u32::from(label) as usize + 1;
-
-        let (length, first_offset) = read::<u32>(&self.bytes, length_offset);
-        assert_eq!(length as usize, patch.len());
-
-        // Write patched address values.
-        for (i, value) in patch.iter().enumerate() {
-            let offset = first_offset + i * size_of::<u32>();
-            self.bytes[offset..offset + size_of::<u32>()]
-                .copy_from_slice(&u32::from(*value).to_le_bytes());
-        }
-    }
-
     pub(crate) fn operands_arena_mut(&mut self) -> &mut OperandArena {
         &mut self.operand_arena
     }
@@ -218,6 +203,17 @@ impl OperandArena {
         let index = self.u32_operands.len() as u32;
         self.u32_operands.push(values);
         OperandHandle::new(index)
+    }
+
+    /// for jump table patching
+    pub(crate) fn patch_address_operands(
+        &mut self,
+        handle: OperandHandle<Address>,
+        patch: &[Address],
+    ) {
+        let values = &mut self.address_operands[handle.index() as usize];
+        assert_eq!(values.len(), patch.len());
+        values.copy_from_slice(patch);
     }
 }
 
@@ -1782,7 +1778,7 @@ generate_opcodes! {
     /// that has finally block.
     ///
     /// Operands: index: Register, count: `u32`, address: `Address` * count
-    JumpTable { index: u32, addresses: ThinVec<Address> },
+    JumpTable { index: u32, addresses_handle: OperandHandle<Address> },
 
     /// Throw exception.
     ///
@@ -2130,7 +2126,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Input: values
     ///   - Output: dst
-    ConcatToString { dst: RegisterOperand, values: OperandHandle<RegisterOperand> },
+    ConcatToString { dst: RegisterOperand, values_handle: OperandHandle<RegisterOperand> },
 
     /// Require the stack value to be neither null nor undefined.
     ///

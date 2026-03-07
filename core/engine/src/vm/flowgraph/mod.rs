@@ -267,7 +267,7 @@ impl CodeBlock {
                 }
                 Instruction::JumpTable {
                     index: _,
-                    addresses,
+                    addresses_handle,
                 } => {
                     graph.add_node(previous_pc, NodeShape::None, label.into(), Color::None);
 
@@ -278,6 +278,11 @@ impl CodeBlock {
                         Color::None,
                         EdgeStyle::Line,
                     );
+
+                    let addresses = self
+                        .bytecode
+                        .operand_arena
+                        .address_operands(addresses_handle);
 
                     for (i, address) in addresses.iter().enumerate() {
                         graph.add_edge(

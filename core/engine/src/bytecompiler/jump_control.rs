@@ -16,7 +16,6 @@ use crate::{
 };
 use bitflags::bitflags;
 use boa_interner::Sym;
-use thin_vec::thin_vec;
 
 /// An actions to be performed for the local control flow.
 #[derive(Debug, Clone, Copy)]
@@ -118,7 +117,9 @@ impl JumpRecord {
                     finally_throw_index,
                 } => {
                     let index = value as i32;
-                    compiler.bytecode_emitter.emit_push_false(finally_throw_flag.into());
+                    compiler
+                        .bytecode_emitter
+                        .emit_push_false(finally_throw_flag.into());
                     compiler.emit_push_integer_with_index(index, finally_throw_index.into());
                 }
                 JumpRecordAction::CloseIterator { r#async } => {
@@ -137,7 +138,9 @@ impl JumpRecord {
                 if return_value_on_stack {
                     let value = compiler.register_allocator.alloc();
                     compiler.pop_into_register(&value);
-                    compiler.bytecode_emitter.emit_set_accumulator(value.variable());
+                    compiler
+                        .bytecode_emitter
+                        .emit_set_accumulator(value.variable());
                     compiler.register_allocator.dealloc(value);
                 }
 
@@ -606,12 +609,12 @@ impl ByteCompiler<'_> {
             self.patch_jump_with_target(*label, finally_start);
         }
 
-        // NOTE: +4 to jump past the index operand.
-        let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
-        self.bytecode_emitter.emit_jump_table(
-            finally_throw_index,
-            thin_vec![Self::DUMMY_ADDRESS; info.jumps.len()],
-        );
+        let addresses_handle = self
+            .bytecode_emitter
+            .operands_arena_mut()
+            .push_address_operands(vec![Self::DUMMY_ADDRESS; info.jumps.len()].into_boxed_slice());
+        self.bytecode_emitter
+            .emit_jump_table(finally_throw_index, addresses_handle);
 
         // We are assuming any indices outside our jump table will fallback
         // to executing the next available op. Since we kinda control the jump
@@ -628,7 +631,8 @@ impl ByteCompiler<'_> {
         }
 
         self.bytecode_emitter
-            .patch_jump_table(jump_table_index, &patch_jumps);
+            .operands_arena_mut()
+            .patch_address_operands(addresses_handle, &patch_jumps);
     }
 
     pub(crate) fn jump_info_open_environment_count(&self, index: usize) -> u32 {

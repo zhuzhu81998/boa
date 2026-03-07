@@ -804,14 +804,25 @@ impl CodeBlock {
             Instruction::TemplateLookup { address, site, dst } => {
                 format!("address:{address}, site:{site}, dst:{dst}")
             }
-            Instruction::JumpTable { index, addresses } => {
+            Instruction::JumpTable {
+                index,
+                addresses_handle,
+            } => {
+                let addresses = self
+                    .bytecode
+                    .operand_arena
+                    .address_operands(*addresses_handle);
                 format!(
                     "index:{index}, jump_table:({})",
                     addresses.iter().format(", ")
                 )
             }
-            Instruction::ConcatToString { dst, values } => {
-                format!("dst:{dst}, values:{values:?}")
+            Instruction::ConcatToString { dst, values_handle } => {
+                let values = self
+                    .bytecode
+                    .operand_arena
+                    .register_operands(*values_handle);
+                format!("dst:{dst}, values:({})", values.iter().format(", "))
             }
             Instruction::CopyDataProperties {
                 object,
