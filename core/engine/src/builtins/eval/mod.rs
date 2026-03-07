@@ -296,7 +296,7 @@ impl Eval {
             .constants
             .push(Constant::Scope(lexical_scope.clone()));
 
-        compiler.bytecode.emit_push_scope(scope_index.into());
+        compiler.bytecode_emitter.emit_push_scope(scope_index.into());
         if strict {
             variable_scope = lexical_scope.clone();
             compiler.variable_scope = lexical_scope.clone();

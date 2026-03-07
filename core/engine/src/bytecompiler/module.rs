@@ -55,7 +55,7 @@ impl ByteCompiler<'_> {
                                 .into_common(false);
                             let key = self.register_allocator.alloc();
                             self.emit_push_literal(Literal::String(default), &key);
-                            self.bytecode.emit_set_function_name(
+                            self.bytecode_emitter.emit_set_function_name(
                                 function.variable(),
                                 key.variable(),
                                 0u32.into(),

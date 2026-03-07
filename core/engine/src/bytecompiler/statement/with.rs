@@ -9,7 +9,7 @@ impl ByteCompiler<'_> {
 
         let outer_scope = self.lexical_scope.clone();
         let _ = self.push_scope(with.scope());
-        self.bytecode
+        self.bytecode_emitter
             .emit_push_object_environment(object.variable());
         self.register_allocator.dealloc(object);
 
@@ -20,6 +20,6 @@ impl ByteCompiler<'_> {
 
         self.pop_scope();
         self.lexical_scope = outer_scope;
-        self.bytecode.emit_pop_environment();
+        self.bytecode_emitter.emit_pop_environment();
     }
 }

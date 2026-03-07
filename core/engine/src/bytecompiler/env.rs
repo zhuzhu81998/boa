@@ -30,7 +30,7 @@ impl ByteCompiler<'_> {
             self.current_open_environments_count += 1;
             let index = self.constants.len() as u32;
             self.constants.push(Constant::Scope(scope.clone()));
-            self.bytecode.emit_push_scope(index.into());
+            self.bytecode_emitter.emit_push_scope(index.into());
         }
         std::mem::swap(&mut self.lexical_scope, &mut scope);
         Some(scope)
@@ -42,7 +42,7 @@ impl ByteCompiler<'_> {
             std::mem::swap(&mut self.lexical_scope, &mut scope);
             if !scope.all_bindings_local() {
                 self.current_open_environments_count -= 1;
-                self.bytecode.emit_pop_environment();
+                self.bytecode_emitter.emit_pop_environment();
             }
         }
     }

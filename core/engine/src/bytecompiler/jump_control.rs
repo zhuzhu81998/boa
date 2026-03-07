@@ -109,7 +109,7 @@ impl JumpRecord {
                 }
                 JumpRecordAction::PopEnvironments { count } => {
                     for _ in 0..count {
-                        compiler.bytecode.emit_pop_environment();
+                        compiler.bytecode_emitter.emit_pop_environment();
                     }
                 }
                 JumpRecordAction::HandleFinally {
@@ -118,7 +118,7 @@ impl JumpRecord {
                     finally_throw_index,
                 } => {
                     let index = value as i32;
-                    compiler.bytecode.emit_push_false(finally_throw_flag.into());
+                    compiler.bytecode_emitter.emit_push_false(finally_throw_flag.into());
                     compiler.emit_push_integer_with_index(index, finally_throw_index.into());
                 }
                 JumpRecordAction::CloseIterator { r#async } => {
@@ -137,7 +137,7 @@ impl JumpRecord {
                 if return_value_on_stack {
                     let value = compiler.register_allocator.alloc();
                     compiler.pop_into_register(&value);
-                    compiler.bytecode.emit_set_accumulator(value.variable());
+                    compiler.bytecode_emitter.emit_set_accumulator(value.variable());
                     compiler.register_allocator.dealloc(value);
                 }
 
@@ -146,7 +146,7 @@ impl JumpRecord {
                     //  - 27.6.3.2 AsyncGeneratorStart ( generator, generatorBody ): https://tc39.es/ecma262/#sec-asyncgeneratorstart
                     //
                     // Note: If we are returning we have to close the async generator function.
-                    (true, true) => compiler.bytecode.emit_async_generator_close(),
+                    (true, true) => compiler.bytecode_emitter.emit_async_generator_close(),
 
                     // Taken from:
                     //  - 27.7.5.2 AsyncBlockStart ( promiseCapability, asyncBody, asyncContext ): <https://tc39.es/ecma262/#sec-asyncblockstart>
@@ -157,7 +157,7 @@ impl JumpRecord {
                         let exception = compiler.register_allocator.alloc();
 
                         compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_maybe_exception(has_exception.variable(), exception.variable());
 
                         // Pushes `undefined` to the stack, which acts as the
@@ -175,7 +175,7 @@ impl JumpRecord {
                                 );
                                 compiler.push_from_register(&exception);
                                 compiler.register_allocator.dealloc(exception);
-                                compiler.bytecode.emit_call(1u8.into());
+                                compiler.bytecode_emitter.emit_call(1u8.into());
                             },
                             |compiler| {
                                 // has_exception == false, call `resolve` normally.
@@ -187,30 +187,30 @@ impl JumpRecord {
                                 {
                                     let value = compiler.register_allocator.alloc();
                                     compiler
-                                        .bytecode
+                                        .bytecode_emitter
                                         .emit_set_register_from_accumulator(value.variable());
                                     compiler.push_from_register(&value);
                                     compiler.register_allocator.dealloc(value);
                                 }
-                                compiler.bytecode.emit_call(1u8.into());
+                                compiler.bytecode_emitter.emit_call(1u8.into());
                             },
                         );
 
                         // Finally, set the accumulator value to the promise from the
                         // promise capability
-                        compiler.bytecode.emit_set_accumulator(
+                        compiler.bytecode_emitter.emit_set_accumulator(
                             (CallFrame::PROMISE_CAPABILITY_PROMISE_REGISTER_INDEX as u32).into(),
                         );
                     }
                     (false, false) => {
                         // TODO: We can omit checking for return, when constructing for functions,
                         // that cannot be constructed, like arrow functions.
-                        compiler.bytecode.emit_check_return();
+                        compiler.bytecode_emitter.emit_check_return();
                     }
                     (false, true) => {}
                 }
 
-                compiler.bytecode.emit_return();
+                compiler.bytecode_emitter.emit_return();
             }
         }
     }
@@ -608,7 +608,7 @@ impl ByteCompiler<'_> {
 
         // NOTE: +4 to jump past the index operand.
         let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
-        self.bytecode.emit_jump_table(
+        self.bytecode_emitter.emit_jump_table(
             finally_throw_index,
             thin_vec![Self::DUMMY_ADDRESS; info.jumps.len()],
         );
@@ -627,7 +627,7 @@ impl ByteCompiler<'_> {
             jump_record.perform_actions(Self::DUMMY_ADDRESS, self);
         }
 
-        self.bytecode
+        self.bytecode_emitter
             .patch_jump_table(jump_table_index, &patch_jumps);
     }
 

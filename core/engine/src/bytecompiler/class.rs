@@ -133,21 +133,21 @@ impl ByteCompiler<'_> {
                 compiler.compile_statement_list(expr.body().statement_list(), false, false);
             }
 
-            compiler.bytecode.emit_push_undefined(value.variable());
+            compiler.bytecode_emitter.emit_push_undefined(value.variable());
         } else if class.super_ref.is_some() {
             // We push an empty, unused function scope since the compiler expects a function scope.
             compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
             let _ = compiler.push_scope(&Scope::new(compiler.lexical_scope.clone(), true));
-            compiler.bytecode.emit_super_call_derived();
+            compiler.bytecode_emitter.emit_super_call_derived();
             compiler.pop_into_register(&value);
-            compiler.bytecode.emit_bind_this_value(value.variable());
+            compiler.bytecode_emitter.emit_bind_this_value(value.variable());
         } else {
             // We push an empty, unused function scope since the compiler expects a function scope.
             compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
             let _ = compiler.push_scope(&Scope::new(compiler.lexical_scope.clone(), true));
-            compiler.bytecode.emit_push_undefined(value.variable());
+            compiler.bytecode_emitter.emit_push_undefined(value.variable());
         }
-        compiler.bytecode.emit_set_accumulator(value.variable());
+        compiler.bytecode_emitter.emit_set_accumulator(value.variable());
         compiler.register_allocator.dealloc(value);
 
         // 17. If ClassHeritageopt is present, set F.[[ConstructorKind]] to derived.
@@ -166,19 +166,19 @@ impl ByteCompiler<'_> {
 
         if let Some(node) = class.super_ref {
             self.compile_expr(node, &prototype_register);
-            self.bytecode.emit_push_class_prototype(
+            self.bytecode_emitter.emit_push_class_prototype(
                 prototype_register.variable(),
                 class_register.variable(),
                 prototype_register.variable(),
             );
         } else {
-            self.bytecode
+            self.bytecode_emitter
                 .emit_push_undefined(prototype_register.variable());
         }
 
         let proto_register = self.register_allocator.alloc();
 
-        self.bytecode.emit_set_class_prototype(
+        self.bytecode_emitter.emit_set_class_prototype(
             proto_register.variable(),
             prototype_register.variable(),
             class_register.variable(),
@@ -202,7 +202,7 @@ impl ByteCompiler<'_> {
                 _ => {}
             }
         }
-        self.bytecode
+        self.bytecode_emitter
             .emit_push_private_environment(class_register.variable(), name_indices);
 
         let mut static_elements = Vec::new();
@@ -232,42 +232,42 @@ impl ByteCompiler<'_> {
 
                         match (m.is_static(), m.kind()) {
                             (true, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_define_class_static_getter_by_name(
+                                self.bytecode_emitter.emit_define_class_static_getter_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
                                 );
                             }
                             (true, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_define_class_static_setter_by_name(
+                                self.bytecode_emitter.emit_define_class_static_setter_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
                                 );
                             }
                             (true, _) => {
-                                self.bytecode.emit_define_class_static_method_by_name(
+                                self.bytecode_emitter.emit_define_class_static_method_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
                                 );
                             }
                             (false, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_define_class_getter_by_name(
+                                self.bytecode_emitter.emit_define_class_getter_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
                                 );
                             }
                             (false, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_define_class_setter_by_name(
+                                self.bytecode_emitter.emit_define_class_setter_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
                                 );
                             }
                             (false, _) => {
-                                self.bytecode.emit_define_class_method_by_name(
+                                self.bytecode_emitter.emit_define_class_method_by_name(
                                     method.variable(),
                                     object_register.variable(),
                                     index.into(),
@@ -280,7 +280,7 @@ impl ByteCompiler<'_> {
                     ClassElementName::PropertyName(PropertyName::Computed(name)) => {
                         let key = self.register_allocator.alloc();
                         self.compile_expr(name, &key);
-                        self.bytecode
+                        self.bytecode_emitter
                             .emit_to_property_key(key.variable(), key.variable());
                         let method = self.method(m.into());
                         let object_register = if m.is_static() {
@@ -291,42 +291,42 @@ impl ByteCompiler<'_> {
 
                         match (m.is_static(), m.kind()) {
                             (true, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_define_class_static_getter_by_value(
+                                self.bytecode_emitter.emit_define_class_static_getter_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
                                 );
                             }
                             (true, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_define_class_static_setter_by_value(
+                                self.bytecode_emitter.emit_define_class_static_setter_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
                                 );
                             }
                             (true, _) => {
-                                self.bytecode.emit_define_class_static_method_by_value(
+                                self.bytecode_emitter.emit_define_class_static_method_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
                                 );
                             }
                             (false, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_define_class_getter_by_value(
+                                self.bytecode_emitter.emit_define_class_getter_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
                                 );
                             }
                             (false, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_define_class_setter_by_value(
+                                self.bytecode_emitter.emit_define_class_setter_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
                                 );
                             }
                             (false, _) => {
-                                self.bytecode.emit_define_class_method_by_value(
+                                self.bytecode_emitter.emit_define_class_method_by_value(
                                     method.variable(),
                                     key.variable(),
                                     object_register.variable(),
@@ -342,42 +342,42 @@ impl ByteCompiler<'_> {
                         let method = self.method(m.into());
                         match (m.is_static(), m.kind()) {
                             (true, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_set_private_getter(
+                                self.bytecode_emitter.emit_set_private_getter(
                                     class_register.variable(),
                                     method.variable(),
                                     index.into(),
                                 );
                             }
                             (true, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_set_private_setter(
+                                self.bytecode_emitter.emit_set_private_setter(
                                     class_register.variable(),
                                     method.variable(),
                                     index.into(),
                                 );
                             }
                             (true, _) => {
-                                self.bytecode.emit_set_private_method(
+                                self.bytecode_emitter.emit_set_private_method(
                                     class_register.variable(),
                                     method.variable(),
                                     index.into(),
                                 );
                             }
                             (false, MethodDefinitionKind::Get) => {
-                                self.bytecode.emit_push_class_private_getter(
+                                self.bytecode_emitter.emit_push_class_private_getter(
                                     class_register.variable(),
                                     method.variable(),
                                     index.into(),
                                 );
                             }
                             (false, MethodDefinitionKind::Set) => {
-                                self.bytecode.emit_push_class_private_setter(
+                                self.bytecode_emitter.emit_push_class_private_setter(
                                     class_register.variable(),
                                     method.variable(),
                                     index.into(),
                                 );
                             }
                             (false, _) => {
-                                self.bytecode.emit_push_class_private_method(
+                                self.bytecode_emitter.emit_push_class_private_method(
                                     class_register.variable(),
                                     proto_register.variable(),
                                     method.variable(),
@@ -428,13 +428,13 @@ impl ByteCompiler<'_> {
                         node.is_anonymous_function_definition()
                     } else {
                         field_compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_push_undefined(value.variable());
                         false
                     };
 
                     field_compiler
-                        .bytecode
+                        .bytecode_emitter
                         .emit_set_accumulator(value.variable());
                     field_compiler.register_allocator.dealloc(value);
 
@@ -445,7 +445,7 @@ impl ByteCompiler<'_> {
 
                     let dst = self.register_allocator.alloc();
                     self.emit_get_function(&dst, index);
-                    self.bytecode.emit_push_class_field(
+                    self.bytecode_emitter.emit_push_class_field(
                         class_register.variable(),
                         name.variable(),
                         dst.variable(),
@@ -476,11 +476,11 @@ impl ByteCompiler<'_> {
                         field_compiler.compile_expr(node, &value);
                     } else {
                         field_compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_push_undefined(value.variable());
                     }
                     field_compiler
-                        .bytecode
+                        .bytecode_emitter
                         .emit_set_accumulator(value.variable());
                     field_compiler.register_allocator.dealloc(value);
 
@@ -490,7 +490,7 @@ impl ByteCompiler<'_> {
                     let index = self.push_function_to_constants(code);
                     let dst = self.register_allocator.alloc();
                     self.emit_get_function(&dst, index);
-                    self.bytecode.emit_push_class_field_private(
+                    self.bytecode_emitter.emit_push_class_field_private(
                         class_register.variable(),
                         dst.variable(),
                         name_index.into(),
@@ -529,13 +529,13 @@ impl ByteCompiler<'_> {
                         node.is_anonymous_function_definition()
                     } else {
                         field_compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_push_undefined(value.variable());
                         false
                     };
 
                     field_compiler
-                        .bytecode
+                        .bytecode_emitter
                         .emit_set_accumulator(value.variable());
                     field_compiler.register_allocator.dealloc(value);
 
@@ -573,13 +573,13 @@ impl ByteCompiler<'_> {
                         node.is_anonymous_function_definition()
                     } else {
                         field_compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_push_undefined(value.variable());
                         false
                     };
 
                     field_compiler
-                        .bytecode
+                        .bytecode_emitter
                         .emit_set_accumulator(value.variable());
                     field_compiler.register_allocator.dealloc(value);
 
@@ -641,13 +641,13 @@ impl ByteCompiler<'_> {
                     let index = self.push_function_to_constants(code);
                     let function = self.register_allocator.alloc();
                     self.emit_get_function(&function, index);
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_set_home_object(function.variable(), class_register.variable());
                     self.push_from_register(&class_register);
                     self.push_from_register(&function);
                     self.register_allocator.dealloc(function);
-                    self.bytecode.emit_call(0u32.into());
-                    self.bytecode.emit_pop();
+                    self.bytecode_emitter.emit_call(0u32.into());
+                    self.bytecode_emitter.emit_pop();
                 }
                 StaticElement::StaticField {
                     code,
@@ -657,24 +657,24 @@ impl ByteCompiler<'_> {
                     let index = self.push_function_to_constants(code);
                     let function = self.register_allocator.alloc();
                     self.emit_get_function(&function, index);
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_set_home_object(function.variable(), class_register.variable());
                     self.push_from_register(&class_register);
                     self.push_from_register(&function);
                     self.register_allocator.dealloc(function);
-                    self.bytecode.emit_call(0u32.into());
+                    self.bytecode_emitter.emit_call(0u32.into());
                     let value = self.register_allocator.alloc();
                     self.pop_into_register(&value);
                     match name_index {
                         StaticFieldName::PrivateName(name) => {
-                            self.bytecode.emit_define_private_field(
+                            self.bytecode_emitter.emit_define_private_field(
                                 class_register.variable(),
                                 value.variable(),
                                 name.into(),
                             );
                         }
                         StaticFieldName::Index(name) => {
-                            self.bytecode.emit_define_own_property_by_name(
+                            self.bytecode_emitter.emit_define_own_property_by_name(
                                 class_register.variable(),
                                 value.variable(),
                                 name.into(),
@@ -682,15 +682,15 @@ impl ByteCompiler<'_> {
                         }
                         StaticFieldName::Register(key) => {
                             if is_anonymous_function {
-                                self.bytecode
+                                self.bytecode_emitter
                                     .emit_to_property_key(key.variable(), key.variable());
-                                self.bytecode.emit_set_function_name(
+                                self.bytecode_emitter.emit_set_function_name(
                                     value.variable(),
                                     key.variable(),
                                     0u32.into(),
                                 );
                             }
-                            self.bytecode.emit_define_own_property_by_value(
+                            self.bytecode_emitter.emit_define_own_property_by_value(
                                 value.variable(),
                                 key.variable(),
                                 class_register.variable(),
@@ -707,10 +707,10 @@ impl ByteCompiler<'_> {
         self.register_allocator.dealloc(proto_register);
 
         self.pop_declarative_scope(outer_scope);
-        self.bytecode.emit_pop_private_environment();
+        self.bytecode_emitter.emit_pop_private_environment();
 
         if let Some(dst) = dst {
-            self.bytecode
+            self.bytecode_emitter
                 .emit_move(dst.variable(), class_register.variable());
         } else {
             self.emit_binding(BindingOpcode::InitVar, class_name, &class_register);

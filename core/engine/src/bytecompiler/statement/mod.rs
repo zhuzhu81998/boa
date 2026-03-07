@@ -41,14 +41,14 @@ impl ByteCompiler<'_> {
             }
             Statement::Continue(node) => {
                 if root_statement && (use_expr || self.jump_control_info_has_use_expr()) {
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_set_accumulator(CallFrame::undefined_register().variable());
                 }
                 self.compile_continue(*node, use_expr);
             }
             Statement::Break(node) => {
                 if root_statement && (use_expr || self.jump_control_info_has_use_expr()) {
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_set_accumulator(CallFrame::undefined_register().variable());
                 }
                 self.compile_break(*node, use_expr);
@@ -58,7 +58,7 @@ impl ByteCompiler<'_> {
 
                 let error = compiler.register_allocator.alloc();
                 compiler.compile_expr(throw.target(), &error);
-                compiler.bytecode.emit_throw(error.variable());
+                compiler.bytecode_emitter.emit_throw(error.variable());
                 compiler.register_allocator.dealloc(error);
             }
             Statement::Switch(switch) => {
@@ -91,7 +91,7 @@ impl ByteCompiler<'_> {
                 if use_expr {
                     let value = self.register_allocator.alloc();
                     self.compile_expr(expr, &value);
-                    self.bytecode.emit_set_accumulator(value.variable());
+                    self.bytecode_emitter.emit_set_accumulator(value.variable());
                     self.register_allocator.dealloc(value);
                 } else {
                     self.compile_expr_for_side_effects(expr);

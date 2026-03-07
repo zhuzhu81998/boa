@@ -390,7 +390,7 @@ impl ByteCompiler<'_> {
             // c. Let hasRestrictedGlobal be ? env.HasRestrictedGlobalProperty(name).
             let value = self.register_allocator.alloc();
             let index = self.get_or_insert_string(name);
-            self.bytecode
+            self.bytecode_emitter
                 .emit_has_restricted_global_property(value.variable(), index.into());
 
             // d. If hasRestrictedGlobal is true, throw a SyntaxError exception.
@@ -430,7 +430,7 @@ impl ByteCompiler<'_> {
                 // 1. Let fnDefinable be ? env.CanDeclareGlobalFunction(fn).
                 let value = self.register_allocator.alloc();
                 let index = self.get_or_insert_name(name.sym());
-                self.bytecode
+                self.bytecode_emitter
                     .emit_can_declare_global_function(value.variable(), index.into());
 
                 // 2. If fnDefinable is false, throw a TypeError exception.
@@ -466,7 +466,7 @@ impl ByteCompiler<'_> {
                     // a. Let vnDefinable be ? env.CanDeclareGlobalVar(vn).
                     let value = self.register_allocator.alloc();
                     let index = self.get_or_insert_name(name);
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_can_declare_global_var(value.variable(), index.into());
 
                     // b. If vnDefinable is false, throw a TypeError exception.
@@ -557,7 +557,7 @@ impl ByteCompiler<'_> {
 
             // c. Perform ? env.CreateGlobalFunctionBinding(fn, fo, false).
             let name_index = self.get_or_insert_name(name.sym());
-            self.bytecode.emit_create_global_function_binding(
+            self.bytecode_emitter.emit_create_global_function_binding(
                 dst.variable(),
                 false.into(),
                 name_index.into(),
@@ -569,7 +569,7 @@ impl ByteCompiler<'_> {
         for var in declared_var_names {
             // a. Perform ? env.CreateGlobalVarBinding(vn, false).
             let index = self.get_or_insert_name(var);
-            self.bytecode
+            self.bytecode_emitter
                 .emit_create_global_var_binding(false.into(), index.into());
         }
 
@@ -682,7 +682,7 @@ impl ByteCompiler<'_> {
                     // a. Let fnDefinable be ? varEnv.CanDeclareGlobalFunction(fn).
                     let value = self.register_allocator.alloc();
                     let index = self.get_or_insert_name(name.sym());
-                    self.bytecode
+                    self.bytecode_emitter
                         .emit_can_declare_global_function(value.variable(), index.into());
 
                     // b. If fnDefinable is false, throw a TypeError exception.
@@ -745,7 +745,7 @@ impl ByteCompiler<'_> {
                         // i. Let vnDefinable be ? varEnv.CanDeclareGlobalVar(vn).
                         let value = self.register_allocator.alloc();
                         let index = self.get_or_insert_name(name);
-                        self.bytecode
+                        self.bytecode_emitter
                             .emit_can_declare_global_var(value.variable(), index.into());
 
                         // ii. If vnDefinable is false, throw a TypeError exception.
@@ -847,7 +847,7 @@ impl ByteCompiler<'_> {
 
                 // i. Perform ? varEnv.CreateGlobalFunctionBinding(fn, fo, true).
                 let name_index = self.get_or_insert_name(name.sym());
-                self.bytecode.emit_create_global_function_binding(
+                self.bytecode_emitter.emit_create_global_function_binding(
                     dst.variable(),
                     true.into(),
                     name_index.into(),
@@ -891,7 +891,7 @@ impl ByteCompiler<'_> {
                 let index = self.get_or_insert_name(name);
 
                 // i. Perform ? varEnv.CreateGlobalVarBinding(vn, true).
-                self.bytecode
+                self.bytecode_emitter
                     .emit_create_global_var_binding(true.into(), index.into());
             }
         }
@@ -1033,7 +1033,7 @@ impl ByteCompiler<'_> {
             let value = self.register_allocator.alloc();
             if strict || !formals.is_simple() {
                 // i. Let ao be CreateUnmappedArgumentsObject(argumentsList).
-                self.bytecode
+                self.bytecode_emitter
                     .emit_create_unmapped_arguments_object(value.variable());
             }
             // b. Else,
@@ -1042,7 +1042,7 @@ impl ByteCompiler<'_> {
                 //          that don't have a rest parameter, any parameter
                 //          default value initializers, or any destructured parameters.
                 // ii. Let ao be CreateMappedArgumentsObject(func, formals, argumentsList, env).
-                self.bytecode
+                self.bytecode_emitter
                     .emit_create_mapped_arguments_object(value.variable());
                 self.emitted_mapped_arguments_object_opcode = true;
             }
@@ -1074,9 +1074,9 @@ impl ByteCompiler<'_> {
         for (i, parameter) in formals.as_ref().iter().enumerate() {
             let value = self.register_allocator.alloc();
             if parameter.is_rest_param() {
-                self.bytecode.emit_rest_parameter_init(value.variable());
+                self.bytecode_emitter.emit_rest_parameter_init(value.variable());
             } else {
-                self.bytecode
+                self.bytecode_emitter
                     .emit_get_argument((i as u32).into(), value.variable());
             }
 
@@ -1104,11 +1104,11 @@ impl ByteCompiler<'_> {
 
         if generator {
             if self.is_async() {
-                self.bytecode.emit_async_generator();
+                self.bytecode_emitter.emit_async_generator();
             } else {
-                self.bytecode.emit_generator();
+                self.bytecode_emitter.emit_generator();
             }
-            self.bytecode.emit_pop();
+            self.bytecode_emitter.emit_pop();
         }
 
         // 27. If hasParameterExpressions is false, then
@@ -1146,7 +1146,7 @@ impl ByteCompiler<'_> {
                         // 3. If parameterBindings does not contain n, or if functionNames contains n, then
                         if !parameter_bindings.contains(&n) || function_names.contains(&n) {
                             // a. Let initialValue be undefined.
-                            self.bytecode.emit_push_undefined(value.variable());
+                            self.bytecode_emitter.emit_push_undefined(value.variable());
                         }
                         // 4. Else,
                         else {
@@ -1162,7 +1162,7 @@ impl ByteCompiler<'_> {
                         let index = self.insert_binding(binding);
 
                         // TODO: What?
-                        self.bytecode.emit_push_undefined(value.variable());
+                        self.bytecode_emitter.emit_push_undefined(value.variable());
                         self.emit_binding_access(BindingAccessOpcode::DefInitVar, &index, &value);
                         self.register_allocator.dealloc(value);
 

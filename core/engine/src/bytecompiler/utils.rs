@@ -15,7 +15,7 @@ impl ByteCompiler<'_> {
     pub(super) fn iterator_close(&mut self, async_: bool) {
         let value = self.register_allocator.alloc();
         let called = self.register_allocator.alloc();
-        self.bytecode
+        self.bytecode_emitter
             .emit_iterator_return(value.variable(), called.variable());
 
         // `iterator` didn't have a `return` method, is already done or is not on the iterator stack.
@@ -23,7 +23,7 @@ impl ByteCompiler<'_> {
         self.register_allocator.dealloc(called);
 
         if async_ {
-            self.bytecode.emit_await(value.variable());
+            self.bytecode_emitter.emit_await(value.variable());
             let resume_kind = self.register_allocator.alloc();
             self.pop_into_register(&resume_kind);
             self.pop_into_register(&value);
@@ -31,7 +31,7 @@ impl ByteCompiler<'_> {
             self.register_allocator.dealloc(resume_kind);
         }
 
-        self.bytecode.emit_is_object(value.variable());
+        self.bytecode_emitter.emit_is_object(value.variable());
         let skip_throw = self.jump_if_true(&value);
 
         self.register_allocator.dealloc(value);
@@ -39,7 +39,7 @@ impl ByteCompiler<'_> {
         let error_msg = self.get_or_insert_literal(Literal::String(js_string!(
             "inner result was not an object"
         )));
-        self.bytecode.emit_throw_new_type_error(error_msg.into());
+        self.bytecode_emitter.emit_throw_new_type_error(error_msg.into());
 
         self.patch_jump(skip_throw);
         self.patch_jump(early_exit);
@@ -50,12 +50,12 @@ impl ByteCompiler<'_> {
         let start = self.next_opcode_location();
 
         let empty = self.register_allocator.alloc();
-        self.bytecode.emit_iterator_stack_empty(empty.variable());
+        self.bytecode_emitter.emit_iterator_stack_empty(empty.variable());
         let exit = self.jump_if_true(&empty);
         self.register_allocator.dealloc(empty);
 
         self.iterator_close(self.is_async_generator());
-        self.bytecode.emit_jump(start);
+        self.bytecode_emitter.emit_jump(start);
         self.patch_jump(exit);
     }
 
@@ -73,16 +73,16 @@ impl ByteCompiler<'_> {
         // 1. Let generatorKind be GetGeneratorKind().
         if self.is_async() {
             // 2. If generatorKind is async, return ? AsyncGeneratorYield(? Await(value)).
-            self.bytecode.emit_await(value.variable());
+            self.bytecode_emitter.emit_await(value.variable());
             self.pop_into_register(&resume_kind);
             self.pop_into_register(value);
             self.generator_next(value, &resume_kind);
             self.async_generator_yield(value, &resume_kind);
         } else {
             // 3. Otherwise, return ? GeneratorYield(CreateIterResultObject(value, false)).
-            self.bytecode
+            self.bytecode_emitter
                 .emit_create_iterator_result(value.variable(), false.into());
-            self.bytecode.emit_generator_yield(value.variable());
+            self.bytecode_emitter.emit_generator_yield(value.variable());
             self.pop_into_register(&resume_kind);
             self.pop_into_register(value);
         }
@@ -100,14 +100,14 @@ impl ByteCompiler<'_> {
     ///
     /// [async_yield]: https://tc39.es/ecma262/#sec-asyncgeneratoryield
     pub(super) fn async_generator_yield(&mut self, value: &Register, resume_kind: &Register) {
-        self.bytecode.emit_async_generator_yield(value.variable());
+        self.bytecode_emitter.emit_async_generator_yield(value.variable());
         self.pop_into_register(resume_kind);
         self.pop_into_register(value);
 
         let non_return_resume =
             self.jump_if_not_resume_kind(GeneratorResumeKind::Return, resume_kind);
 
-        self.bytecode.emit_await(value.variable());
+        self.bytecode_emitter.emit_await(value.variable());
         self.pop_into_register(resume_kind);
         self.pop_into_register(value);
 

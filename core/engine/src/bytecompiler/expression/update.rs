@@ -55,30 +55,30 @@ impl ByteCompiler<'_> {
                     if discard {
                         // Result unused — just increment in-place.
                         if increment {
-                            compiler.bytecode.emit_inc(local_op, local_op);
+                            compiler.bytecode_emitter.emit_inc(local_op, local_op);
                         } else {
-                            compiler.bytecode.emit_dec(local_op, local_op);
+                            compiler.bytecode_emitter.emit_dec(local_op, local_op);
                         }
                         return;
                     }
 
                     if post {
                         // Save old value to dst (post-increment returns old value).
-                        compiler.bytecode.emit_move(dst.variable(), local_op);
+                        compiler.bytecode_emitter.emit_move(dst.variable(), local_op);
                         // Increment in-place.
                         if increment {
-                            compiler.bytecode.emit_inc(local_op, local_op);
+                            compiler.bytecode_emitter.emit_inc(local_op, local_op);
                         } else {
-                            compiler.bytecode.emit_dec(local_op, local_op);
+                            compiler.bytecode_emitter.emit_dec(local_op, local_op);
                         }
                     } else {
                         if increment {
-                            compiler.bytecode.emit_inc(dst.variable(), local_op);
+                            compiler.bytecode_emitter.emit_inc(dst.variable(), local_op);
                         } else {
-                            compiler.bytecode.emit_dec(dst.variable(), local_op);
+                            compiler.bytecode_emitter.emit_dec(dst.variable(), local_op);
                         }
                         // Write the new value back to the local register.
-                        compiler.bytecode.emit_move(local_op, dst.variable());
+                        compiler.bytecode_emitter.emit_move(local_op, dst.variable());
                     }
                     return;
                 }
@@ -95,9 +95,9 @@ impl ByteCompiler<'_> {
 
                 let value = compiler.register_allocator.alloc();
                 if increment {
-                    compiler.bytecode.emit_inc(value.variable(), dst.variable());
+                    compiler.bytecode_emitter.emit_inc(value.variable(), dst.variable());
                 } else {
-                    compiler.bytecode.emit_dec(value.variable(), dst.variable());
+                    compiler.bytecode_emitter.emit_dec(value.variable(), dst.variable());
                 }
 
                 if is_lexical {
@@ -112,7 +112,7 @@ impl ByteCompiler<'_> {
                         }
                         Err(BindingLocatorError::MutateImmutable) => {
                             let index = compiler.get_or_insert_string(name);
-                            compiler.bytecode.emit_throw_mutate_immutable(index.into());
+                            compiler.bytecode_emitter.emit_throw_mutate_immutable(index.into());
                         }
                         Err(BindingLocatorError::Silent) => {}
                     }
@@ -125,7 +125,7 @@ impl ByteCompiler<'_> {
                 }
                 if !post && !discard {
                     compiler
-                        .bytecode
+                        .bytecode_emitter
                         .emit_move(dst.variable(), value.variable());
                 }
 
@@ -141,16 +141,16 @@ impl ByteCompiler<'_> {
                             compiler.emit_get_property_by_name(dst, None, &object, ident.sym());
                             let value = compiler.register_allocator.alloc();
                             if increment {
-                                compiler.bytecode.emit_inc(value.variable(), dst.variable());
+                                compiler.bytecode_emitter.emit_inc(value.variable(), dst.variable());
                             } else {
-                                compiler.bytecode.emit_dec(value.variable(), dst.variable());
+                                compiler.bytecode_emitter.emit_dec(value.variable(), dst.variable());
                             }
 
                             compiler.emit_set_property_by_name(&value, None, &object, ident.sym());
 
                             if !post {
                                 compiler
-                                    .bytecode
+                                    .bytecode_emitter
                                     .emit_move(dst.variable(), value.variable());
                             }
 
@@ -161,7 +161,7 @@ impl ByteCompiler<'_> {
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);
 
-                            compiler.bytecode.emit_get_property_by_value_push(
+                            compiler.bytecode_emitter.emit_get_property_by_value_push(
                                 dst.variable(),
                                 key.variable(),
                                 object.variable(),
@@ -170,12 +170,12 @@ impl ByteCompiler<'_> {
 
                             let value = compiler.register_allocator.alloc();
                             if increment {
-                                compiler.bytecode.emit_inc(value.variable(), dst.variable());
+                                compiler.bytecode_emitter.emit_inc(value.variable(), dst.variable());
                             } else {
-                                compiler.bytecode.emit_dec(value.variable(), dst.variable());
+                                compiler.bytecode_emitter.emit_dec(value.variable(), dst.variable());
                             }
 
-                            compiler.bytecode.emit_set_property_by_value(
+                            compiler.bytecode_emitter.emit_set_property_by_value(
                                 value.variable(),
                                 key.variable(),
                                 object.variable(),
@@ -184,7 +184,7 @@ impl ByteCompiler<'_> {
 
                             if !post {
                                 compiler
-                                    .bytecode
+                                    .bytecode_emitter
                                     .emit_move(dst.variable(), value.variable());
                             }
 
@@ -200,7 +200,7 @@ impl ByteCompiler<'_> {
                     let object = compiler.register_allocator.alloc();
                     compiler.compile_expr(access.target(), &object);
 
-                    compiler.bytecode.emit_get_private_field(
+                    compiler.bytecode_emitter.emit_get_private_field(
                         dst.variable(),
                         object.variable(),
                         index.into(),
@@ -208,11 +208,11 @@ impl ByteCompiler<'_> {
 
                     let value = compiler.register_allocator.alloc();
                     if increment {
-                        compiler.bytecode.emit_inc(value.variable(), dst.variable());
+                        compiler.bytecode_emitter.emit_inc(value.variable(), dst.variable());
                     } else {
-                        compiler.bytecode.emit_dec(value.variable(), dst.variable());
+                        compiler.bytecode_emitter.emit_dec(value.variable(), dst.variable());
                     }
-                    compiler.bytecode.emit_set_private_field(
+                    compiler.bytecode_emitter.emit_set_private_field(
                         value.variable(),
                         object.variable(),
                         index.into(),
@@ -220,7 +220,7 @@ impl ByteCompiler<'_> {
 
                     if !post {
                         compiler
-                            .bytecode
+                            .bytecode_emitter
                             .emit_move(dst.variable(), value.variable());
                     }
 
@@ -242,9 +242,9 @@ impl ByteCompiler<'_> {
 
                         let value = compiler.register_allocator.alloc();
                         if increment {
-                            compiler.bytecode.emit_inc(value.variable(), dst.variable());
+                            compiler.bytecode_emitter.emit_inc(value.variable(), dst.variable());
                         } else {
-                            compiler.bytecode.emit_dec(value.variable(), dst.variable());
+                            compiler.bytecode_emitter.emit_dec(value.variable(), dst.variable());
                         }
 
                         compiler.emit_set_property_by_name(
@@ -255,7 +255,7 @@ impl ByteCompiler<'_> {
                         );
                         if !post {
                             compiler
-                                .bytecode
+                                .bytecode_emitter
                                 .emit_move(dst.variable(), value.variable());
                         }
 
@@ -271,18 +271,18 @@ impl ByteCompiler<'_> {
                         let key = compiler.register_allocator.alloc();
                         compiler.compile_expr(expr, &key);
 
-                        compiler.bytecode.emit_get_property_by_value(
+                        compiler.bytecode_emitter.emit_get_property_by_value(
                             dst.variable(),
                             key.variable(),
                             receiver.variable(),
                             object.variable(),
                         );
                         if increment {
-                            compiler.bytecode.emit_inc(dst.variable(), dst.variable());
+                            compiler.bytecode_emitter.emit_inc(dst.variable(), dst.variable());
                         } else {
-                            compiler.bytecode.emit_dec(dst.variable(), dst.variable());
+                            compiler.bytecode_emitter.emit_dec(dst.variable(), dst.variable());
                         }
-                        compiler.bytecode.emit_set_property_by_value(
+                        compiler.bytecode_emitter.emit_set_property_by_value(
                             dst.variable(),
                             key.variable(),
                             receiver.variable(),

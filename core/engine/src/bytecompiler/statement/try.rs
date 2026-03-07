@@ -31,8 +31,8 @@ impl ByteCompiler<'_> {
                 let finally_re_throw = self.register_allocator.alloc();
                 let finally_jump_index = self.register_allocator.alloc();
 
-                self.bytecode.emit_push_true(finally_re_throw.variable());
-                self.bytecode.emit_push_zero(finally_jump_index.variable());
+                self.bytecode_emitter.emit_push_true(finally_re_throw.variable());
+                self.bytecode_emitter.emit_push_zero(finally_jump_index.variable());
 
                 self.push_try_with_finally_control_info(
                     &finally_re_throw,
@@ -46,8 +46,8 @@ impl ByteCompiler<'_> {
                 let finally_re_throw = self.register_allocator.alloc();
                 let finally_jump_index = self.register_allocator.alloc();
 
-                self.bytecode.emit_push_true(finally_re_throw.variable());
-                self.bytecode.emit_push_zero(finally_jump_index.variable());
+                self.bytecode_emitter.emit_push_true(finally_re_throw.variable());
+                self.bytecode_emitter.emit_push_zero(finally_jump_index.variable());
 
                 self.push_try_with_finally_control_info(
                     &finally_re_throw,
@@ -65,7 +65,7 @@ impl ByteCompiler<'_> {
         self.compile_block(t.block(), use_expr);
 
         if let Some((finally_re_throw, _)) = variant.finally_re_throw_register() {
-            self.bytecode.emit_push_false(finally_re_throw.variable());
+            self.bytecode_emitter.emit_push_false(finally_re_throw.variable());
         }
 
         let finally = self.jump();
@@ -75,7 +75,7 @@ impl ByteCompiler<'_> {
         match variant {
             TryVariant::Catch(c) => {
                 let error = self.register_allocator.alloc();
-                self.bytecode.emit_exception(error.variable());
+                self.bytecode_emitter.emit_exception(error.variable());
                 self.compile_catch_stmt(c, &error, use_expr);
                 self.register_allocator.dealloc(error);
                 self.patch_jump(finally);
@@ -83,13 +83,13 @@ impl ByteCompiler<'_> {
             TryVariant::CatchFinally((c, f, finally_re_throw, finally_jump_index)) => {
                 let catch_handler = self.push_handler();
                 let error = self.register_allocator.alloc();
-                self.bytecode.emit_exception(error.variable());
+                self.bytecode_emitter.emit_exception(error.variable());
                 self.compile_catch_stmt(c, &error, use_expr);
-                self.bytecode.emit_push_false(finally_re_throw.variable());
+                self.bytecode_emitter.emit_push_false(finally_re_throw.variable());
 
                 let no_throw = self.jump();
                 self.patch_handler(catch_handler);
-                self.bytecode.emit_push_true(finally_re_throw.variable());
+                self.bytecode_emitter.emit_push_true(finally_re_throw.variable());
 
                 self.patch_jump(no_throw);
                 self.patch_jump(finally);
@@ -102,7 +102,7 @@ impl ByteCompiler<'_> {
                 self.compile_finally_stmt(f);
                 self.register_allocator.dealloc(error);
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
-                self.bytecode.emit_re_throw();
+                self.bytecode_emitter.emit_re_throw();
                 self.patch_jump(do_not_throw_exit);
                 self.pop_try_with_finally_control_info(finally_start);
                 self.register_allocator.dealloc(finally_re_throw);
@@ -113,21 +113,21 @@ impl ByteCompiler<'_> {
             {
                 let catch_handler = self.push_handler();
                 let error = self.register_allocator.alloc();
-                self.bytecode.emit_exception(error.variable());
+                self.bytecode_emitter.emit_exception(error.variable());
                 // Is this a generator `return()` empty exception?
                 //
                 // This is false because when the `Exception` opcode is executed,
                 // it rethrows the empty exception, so if we reached this section,
                 // that means it's not an `return()` generator exception.
                 let re_throw_generator = self.register_allocator.alloc();
-                self.bytecode.emit_push_false(re_throw_generator.variable());
+                self.bytecode_emitter.emit_push_false(re_throw_generator.variable());
 
                 // Should we rethrow the exception?
-                self.bytecode.emit_push_true(finally_re_throw.variable());
+                self.bytecode_emitter.emit_push_true(finally_re_throw.variable());
 
                 let no_throw = self.jump();
                 self.patch_handler(catch_handler);
-                self.bytecode.emit_push_true(re_throw_generator.variable());
+                self.bytecode_emitter.emit_push_true(re_throw_generator.variable());
 
                 self.patch_jump(no_throw);
                 self.patch_jump(finally);
@@ -140,10 +140,10 @@ impl ByteCompiler<'_> {
                 self.compile_finally_stmt(f);
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
                 let is_generator_exit = self.jump_if_true(&re_throw_generator);
-                self.bytecode.emit_throw(error.variable());
+                self.bytecode_emitter.emit_throw(error.variable());
                 self.register_allocator.dealloc(error);
                 self.patch_jump(is_generator_exit);
-                self.bytecode.emit_re_throw();
+                self.bytecode_emitter.emit_re_throw();
                 self.patch_jump(do_not_throw_exit);
                 self.register_allocator.dealloc(re_throw_generator);
                 self.pop_try_with_finally_control_info(finally_start);
@@ -153,8 +153,8 @@ impl ByteCompiler<'_> {
             TryVariant::Finally((f, finally_re_throw, finally_jump_index)) => {
                 let catch_handler = self.push_handler();
                 let error = self.register_allocator.alloc();
-                self.bytecode.emit_exception(error.variable());
-                self.bytecode.emit_push_true(finally_re_throw.variable());
+                self.bytecode_emitter.emit_exception(error.variable());
+                self.bytecode_emitter.emit_push_true(finally_re_throw.variable());
 
                 let no_throw = self.jump();
                 self.patch_handler(catch_handler);
@@ -169,7 +169,7 @@ impl ByteCompiler<'_> {
                     .flags |= JumpControlInfoFlags::IN_FINALLY;
                 self.compile_finally_stmt(f);
                 let do_not_throw_exit = self.jump_if_false(&finally_re_throw);
-                self.bytecode.emit_throw(error.variable());
+                self.bytecode_emitter.emit_throw(error.variable());
                 self.register_allocator.dealloc(error);
                 self.patch_jump(do_not_throw_exit);
                 self.pop_try_with_finally_control_info(finally_start);
@@ -202,10 +202,10 @@ impl ByteCompiler<'_> {
     pub(crate) fn compile_finally_stmt(&mut self, finally: &Finally) {
         // TODO: We could probably remove the Get/SetAccumulatorFromStack if we check that there is no break/continues statements.
         let value = self.register_allocator.alloc();
-        self.bytecode
+        self.bytecode_emitter
             .emit_set_register_from_accumulator(value.variable());
         self.compile_catch_finally_block(finally.block(), false);
-        self.bytecode.emit_set_accumulator(value.variable());
+        self.bytecode_emitter.emit_set_accumulator(value.variable());
         self.register_allocator.dealloc(value);
     }
 
@@ -223,7 +223,7 @@ impl ByteCompiler<'_> {
             match statement {
                 StatementListItem::Statement(statement) => match statement.as_ref() {
                     Statement::Break(_) | Statement::Continue(_) => {
-                        self.bytecode
+                        self.bytecode_emitter
                             .emit_set_accumulator(CallFrame::undefined_register().variable());
                         break;
                     }

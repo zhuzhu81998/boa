@@ -14,24 +14,24 @@ impl ByteCompiler<'_> {
                     compiler.compile_optional_delete(opt, dst);
                 } else {
                     compiler.compile_expr(unary.target(), dst);
-                    compiler.bytecode.emit_push_true(dst.variable());
+                    compiler.bytecode_emitter.emit_push_true(dst.variable());
                 }
             }
             UnaryOp::Minus => {
                 self.compile_expr(unary.target(), dst);
-                self.bytecode.emit_neg(dst.variable());
+                self.bytecode_emitter.emit_neg(dst.variable());
             }
             UnaryOp::Plus => {
                 self.compile_expr(unary.target(), dst);
-                self.bytecode.emit_pos(dst.variable());
+                self.bytecode_emitter.emit_pos(dst.variable());
             }
             UnaryOp::Not => {
                 self.compile_expr(unary.target(), dst);
-                self.bytecode.emit_logical_not(dst.variable());
+                self.bytecode_emitter.emit_logical_not(dst.variable());
             }
             UnaryOp::Tilde => {
                 self.compile_expr(unary.target(), dst);
-                self.bytecode.emit_bit_not(dst.variable());
+                self.bytecode_emitter.emit_bit_not(dst.variable());
             }
             UnaryOp::TypeOf => {
                 match unary.target().flatten() {
@@ -47,11 +47,11 @@ impl ByteCompiler<'_> {
                     }
                     expr => self.compile_expr(expr, dst),
                 }
-                self.bytecode.emit_type_of(dst.variable());
+                self.bytecode_emitter.emit_type_of(dst.variable());
             }
             UnaryOp::Void => {
                 self.compile_expr(unary.target(), dst);
-                self.bytecode.emit_push_undefined(dst.variable());
+                self.bytecode_emitter.emit_push_undefined(dst.variable());
             }
         }
     }

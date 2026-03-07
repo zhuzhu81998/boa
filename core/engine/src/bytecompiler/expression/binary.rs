@@ -33,13 +33,13 @@ impl ByteCompiler<'_> {
                 let exit = self.next_opcode_location();
                 match op {
                     LogicalOp::And => self
-                        .bytecode
+                        .bytecode_emitter
                         .emit_logical_and(Self::DUMMY_ADDRESS, dst.variable()),
                     LogicalOp::Or => self
-                        .bytecode
+                        .bytecode_emitter
                         .emit_logical_or(Self::DUMMY_ADDRESS, dst.variable()),
                     LogicalOp::Coalesce => self
-                        .bytecode
+                        .bytecode_emitter
                         .emit_coalesce(Self::DUMMY_ADDRESS, dst.variable()),
                 }
                 self.compile_expr(binary.rhs(), dst);
@@ -61,7 +61,7 @@ impl ByteCompiler<'_> {
         lhs: RegisterOperand,
     ) {
         self.compile_expr_operand(rhs_expr, |self_, rhs| {
-            let bytecode = &mut self_.bytecode;
+            let bytecode = &mut self_.bytecode_emitter;
             match op {
                 ArithmeticOp::Add => bytecode.emit_add(dst.variable(), lhs, rhs),
                 ArithmeticOp::Sub => bytecode.emit_sub(dst.variable(), lhs, rhs),
@@ -81,7 +81,7 @@ impl ByteCompiler<'_> {
         lhs: RegisterOperand,
     ) {
         self.compile_expr_operand(rhs_expr, |self_, rhs| {
-            let bytecode = &mut self_.bytecode;
+            let bytecode = &mut self_.bytecode_emitter;
             match op {
                 BitwiseOp::And => bytecode.emit_bit_and(dst.variable(), lhs, rhs),
                 BitwiseOp::Or => bytecode.emit_bit_or(dst.variable(), lhs, rhs),
@@ -107,7 +107,7 @@ impl ByteCompiler<'_> {
         lhs: RegisterOperand,
     ) {
         self.compile_expr_operand(rhs_expr, |self_, rhs| {
-            let bytecode = &mut self_.bytecode;
+            let bytecode = &mut self_.bytecode_emitter;
             match op {
                 RelationalOp::Equal => bytecode.emit_eq(dst.variable(), lhs, rhs),
                 RelationalOp::NotEqual => {
@@ -142,7 +142,7 @@ impl ByteCompiler<'_> {
     pub(crate) fn compile_binary_in_private(&mut self, binary: &BinaryInPrivate, dst: &Register) {
         let index = self.get_or_insert_private_name(*binary.lhs());
         self.compile_expr(binary.rhs(), dst);
-        self.bytecode
+        self.bytecode_emitter
             .emit_in_private(dst.variable(), index.into(), dst.variable());
     }
 }

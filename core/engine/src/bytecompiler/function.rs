@@ -184,7 +184,7 @@ impl FunctionCompiler {
         // See: 15.6.2 Runtime Semantics: EvaluateAsyncGeneratorBody: https://tc39.es/ecma262/#sec-runtime-semantics-evaluateasyncgeneratorbody
         if compiler.is_async() && !compiler.is_generator() {
             // 1. Let promiseCapability be ! NewPromiseCapability(%Promise%).
-            compiler.bytecode.emit_create_promise_capability();
+            compiler.bytecode_emitter.emit_create_promise_capability();
 
             // 2. Let declResult be Completion(FunctionDeclarationInstantiation(functionObject, argumentsList)).
             //
