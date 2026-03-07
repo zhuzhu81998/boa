@@ -2130,7 +2130,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Input: values
     ///   - Output: dst
-    ConcatToString { dst: RegisterOperand, values: ThinVec<RegisterOperand> },
+    ConcatToString { dst: RegisterOperand, values: OperandHandle<RegisterOperand> },
 
     /// Require the stack value to be neither null nor undefined.
     ///

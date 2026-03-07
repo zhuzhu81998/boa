@@ -51,7 +51,14 @@ impl ByteCompiler<'_> {
     }
 
     fn compile_template_literal(&mut self, template_literal: &TemplateLiteral, dst: &Register) {
+        // TODO: we do not actually need to allocate both registers and values.
+        // this is just so we can properly use the dealloc(reg) later.
+        // and dealloc can not happen inside the for loop because then register slots are reused.
+        // a change in the allocator model (e.g. relaxing the panic on drop) will save us an alloc on this
+
         let mut registers = Vec::with_capacity(template_literal.elements().len());
+        let mut values = Vec::with_capacity(template_literal.elements().len());
+
         for element in template_literal.elements() {
             let value = self.register_allocator.alloc();
             match element {
@@ -65,15 +72,19 @@ impl ByteCompiler<'_> {
                     self.compile_expr(expr, &value);
                 }
             }
+
+            values.push(value.variable());
             registers.push(value);
         }
 
-        let mut values = ThinVec::with_capacity(registers.len());
-        for reg in &registers {
-            values.push(reg.variable());
-        }
+        let handle = self
+            .bytecode_emitter
+            .operands_arena_mut()
+            .push_register_operands(values.into_boxed_slice());
+
         self.bytecode_emitter
-            .emit_concat_to_string(dst.variable(), values);
+            .emit_concat_to_string(dst.variable(), handle);
+
         for reg in registers {
             self.register_allocator.dealloc(reg);
         }

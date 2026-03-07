@@ -1,6 +1,8 @@
 use super::RegisterOperand;
-use crate::{Context, JsResult, JsString, vm::opcode::Operation};
-use thin_vec::ThinVec;
+use crate::{
+    Context, JsResult, JsString,
+    vm::opcode::{OperandHandle, Operation},
+};
 
 /// `ConcatToString` implements the Opcode Operation for `Opcode::ConcatToString`
 ///
@@ -12,10 +14,17 @@ pub(crate) struct ConcatToString;
 impl ConcatToString {
     #[inline(always)]
     pub(super) fn operation(
-        (string, values): (RegisterOperand, ThinVec<RegisterOperand>),
-
+        (string, handle): (RegisterOperand, OperandHandle<RegisterOperand>),
         context: &mut Context,
     ) -> JsResult<()> {
+        let values = context
+            .vm
+            .frame()
+            .code_block()
+            .bytecode
+            .operand_arena
+            .register_operands(handle)
+            .to_vec(); // TODO: to_vec necessary due to to_string needing owned values. we dont actually have to on most branches of to_string
         let mut strings = Vec::with_capacity(values.len());
         for value in values {
             let val = context.vm.get_register(value.into()).clone();
