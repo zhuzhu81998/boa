@@ -2,10 +2,9 @@ use crate::{
     Context, JsResult,
     builtins::function::OrdinaryFunction,
     environments::PrivateEnvironment,
-    vm::opcode::{Operation, RegisterOperand, VaryingOperand},
+    vm::opcode::{OperandHandle, Operation, RegisterOperand, VaryingOperand},
 };
 use boa_gc::Gc;
-use thin_vec::ThinVec;
 
 /// `PushScope` implements the Opcode Operation for `Opcode::PushScope`
 ///
@@ -65,9 +64,16 @@ pub(crate) struct PushPrivateEnvironment;
 impl PushPrivateEnvironment {
     #[inline(always)]
     pub(crate) fn operation(
-        (class, name_indices): (RegisterOperand, ThinVec<u32>),
+        (class, name_indices_handle): (RegisterOperand, OperandHandle<u32>),
         context: &mut Context,
     ) {
+        let name_indices = context
+            .vm
+            .frame()
+            .code_block()
+            .bytecode
+            .operand_arena
+            .u32_operands(name_indices_handle);
         let class = context.vm.get_register(class.into());
         let class = class.as_object().expect("should be a object");
         let mut names = Vec::with_capacity(name_indices.len());
@@ -76,7 +82,7 @@ impl PushPrivateEnvironment {
                 .vm
                 .frame()
                 .code_block()
-                .constant_string(index as usize);
+                .constant_string((*index) as usize);
             names.push(name);
         }
 

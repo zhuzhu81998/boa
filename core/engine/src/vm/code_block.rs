@@ -797,8 +797,12 @@ impl CodeBlock {
             }
             Instruction::PushPrivateEnvironment {
                 class,
-                name_indices,
+                name_indices_handle,
             } => {
+                let name_indices = self
+                    .bytecode
+                    .operand_arena
+                    .u32_operands(*name_indices_handle);
                 format!("class:{class}, names:{name_indices:?}")
             }
             Instruction::TemplateLookup { address, site, dst } => {

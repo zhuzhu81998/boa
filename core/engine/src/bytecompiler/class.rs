@@ -15,7 +15,6 @@ use boa_ast::{
 };
 use boa_gc::Gc;
 use boa_interner::Sym;
-use thin_vec::ThinVec;
 
 // Static class elements that are initialized at a later time in the class creation.
 enum StaticElement {
@@ -133,21 +132,29 @@ impl ByteCompiler<'_> {
                 compiler.compile_statement_list(expr.body().statement_list(), false, false);
             }
 
-            compiler.bytecode_emitter.emit_push_undefined(value.variable());
+            compiler
+                .bytecode_emitter
+                .emit_push_undefined(value.variable());
         } else if class.super_ref.is_some() {
             // We push an empty, unused function scope since the compiler expects a function scope.
             compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
             let _ = compiler.push_scope(&Scope::new(compiler.lexical_scope.clone(), true));
             compiler.bytecode_emitter.emit_super_call_derived();
             compiler.pop_into_register(&value);
-            compiler.bytecode_emitter.emit_bind_this_value(value.variable());
+            compiler
+                .bytecode_emitter
+                .emit_bind_this_value(value.variable());
         } else {
             // We push an empty, unused function scope since the compiler expects a function scope.
             compiler.code_block_flags |= CodeBlockFlags::HAS_FUNCTION_SCOPE;
             let _ = compiler.push_scope(&Scope::new(compiler.lexical_scope.clone(), true));
-            compiler.bytecode_emitter.emit_push_undefined(value.variable());
+            compiler
+                .bytecode_emitter
+                .emit_push_undefined(value.variable());
         }
-        compiler.bytecode_emitter.emit_set_accumulator(value.variable());
+        compiler
+            .bytecode_emitter
+            .emit_set_accumulator(value.variable());
         compiler.register_allocator.dealloc(value);
 
         // 17. If ClassHeritageopt is present, set F.[[ConstructorKind]] to derived.
@@ -185,7 +192,7 @@ impl ByteCompiler<'_> {
         );
         self.register_allocator.dealloc(prototype_register);
 
-        let mut name_indices = ThinVec::new();
+        let mut name_indices = Vec::new();
         for element in class.elements {
             match element {
                 ClassElement::MethodDefinition(m) => {
@@ -202,8 +209,12 @@ impl ByteCompiler<'_> {
                 _ => {}
             }
         }
+        let name_indices_handle = self
+            .bytecode_emitter
+            .operands_arena_mut()
+            .push_u32_operands(name_indices.into_boxed_slice());
         self.bytecode_emitter
-            .emit_push_private_environment(class_register.variable(), name_indices);
+            .emit_push_private_environment(class_register.variable(), name_indices_handle);
 
         let mut static_elements = Vec::new();
 
@@ -232,25 +243,28 @@ impl ByteCompiler<'_> {
 
                         match (m.is_static(), m.kind()) {
                             (true, MethodDefinitionKind::Get) => {
-                                self.bytecode_emitter.emit_define_class_static_getter_by_name(
-                                    method.variable(),
-                                    object_register.variable(),
-                                    index.into(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_getter_by_name(
+                                        method.variable(),
+                                        object_register.variable(),
+                                        index.into(),
+                                    );
                             }
                             (true, MethodDefinitionKind::Set) => {
-                                self.bytecode_emitter.emit_define_class_static_setter_by_name(
-                                    method.variable(),
-                                    object_register.variable(),
-                                    index.into(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_setter_by_name(
+                                        method.variable(),
+                                        object_register.variable(),
+                                        index.into(),
+                                    );
                             }
                             (true, _) => {
-                                self.bytecode_emitter.emit_define_class_static_method_by_name(
-                                    method.variable(),
-                                    object_register.variable(),
-                                    index.into(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_method_by_name(
+                                        method.variable(),
+                                        object_register.variable(),
+                                        index.into(),
+                                    );
                             }
                             (false, MethodDefinitionKind::Get) => {
                                 self.bytecode_emitter.emit_define_class_getter_by_name(
@@ -291,25 +305,28 @@ impl ByteCompiler<'_> {
 
                         match (m.is_static(), m.kind()) {
                             (true, MethodDefinitionKind::Get) => {
-                                self.bytecode_emitter.emit_define_class_static_getter_by_value(
-                                    method.variable(),
-                                    key.variable(),
-                                    object_register.variable(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_getter_by_value(
+                                        method.variable(),
+                                        key.variable(),
+                                        object_register.variable(),
+                                    );
                             }
                             (true, MethodDefinitionKind::Set) => {
-                                self.bytecode_emitter.emit_define_class_static_setter_by_value(
-                                    method.variable(),
-                                    key.variable(),
-                                    object_register.variable(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_setter_by_value(
+                                        method.variable(),
+                                        key.variable(),
+                                        object_register.variable(),
+                                    );
                             }
                             (true, _) => {
-                                self.bytecode_emitter.emit_define_class_static_method_by_value(
-                                    method.variable(),
-                                    key.variable(),
-                                    object_register.variable(),
-                                );
+                                self.bytecode_emitter
+                                    .emit_define_class_static_method_by_value(
+                                        method.variable(),
+                                        key.variable(),
+                                        object_register.variable(),
+                                    );
                             }
                             (false, MethodDefinitionKind::Get) => {
                                 self.bytecode_emitter.emit_define_class_getter_by_value(

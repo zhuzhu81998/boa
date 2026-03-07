@@ -6,7 +6,6 @@ use crate::{
 };
 use args::Argument;
 use std::{marker::PhantomData, ops::ControlFlow};
-use thin_vec::ThinVec;
 
 mod args;
 
@@ -2208,7 +2207,7 @@ generate_opcodes! {
     ///
     /// - Registers:
     ///   - Input: class, name_indices
-    PushPrivateEnvironment { class: RegisterOperand, name_indices: ThinVec<u32> },
+    PushPrivateEnvironment { class: RegisterOperand, name_indices_handle: OperandHandle<u32> },
 
     /// Pop a private environment.
     PopPrivateEnvironment,
