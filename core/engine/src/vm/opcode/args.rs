@@ -1,5 +1,3 @@
-use thin_vec::ThinVec;
-
 use crate::vm::opcode::OperandHandle;
 
 use super::{Address, RegisterOperand, VaryingOperand};
@@ -111,27 +109,6 @@ fn write_f64(bytes: &mut Vec<u8>, value: f64) {
     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
 }
 
-impl<T: Argument> Argument for ThinVec<T> {
-    fn encode(self, bytes: &mut Vec<u8>) {
-        write_u32(bytes, self.len() as u32);
-        for arg in self {
-            arg.encode(bytes);
-        }
-    }
-
-    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
-        let (len, mut pos) = read::<u32>(bytes, pos);
-        let total_len = len as usize;
-        let mut result = ThinVec::with_capacity(total_len);
-        for _ in 0..total_len {
-            let (arg, new_pos) = T::decode(bytes, pos);
-            result.push(arg);
-            pos = new_pos;
-        }
-        (result, pos)
-    }
-}
-
 impl Argument for () {
     fn encode(self, _: &mut Vec<u8>) {}
 
@@ -236,7 +213,6 @@ impl_argument_for_int!(u8 u16 u32 u64 i8 i16 i32 f32 f64);
 mod tests {
     use super::{Address, Argument, RegisterOperand, VaryingOperand};
     use std::mem::size_of;
-    use thin_vec::ThinVec;
 
     fn round_trip<T: Argument + PartialEq + Clone>(value: &T) {
         let mut bytes = Vec::new();
@@ -315,23 +291,6 @@ mod tests {
         let tuple = (Address::new(0), RegisterOperand::new(1));
         round_trip_eq(&tuple, |a, b| {
             u32::from(a.0) == u32::from(b.0) && u32::from(a.1) == u32::from(b.1)
-        });
-    }
-
-    #[test]
-    fn test_thin_vec_round_trip() {
-        let v: ThinVec<u32> = ThinVec::new();
-        round_trip(&v);
-        let v: ThinVec<u32> = [1u32, 2, 3].into_iter().collect();
-        round_trip(&v);
-        let v: ThinVec<RegisterOperand> = [RegisterOperand::new(0), RegisterOperand::new(1)]
-            .into_iter()
-            .collect();
-        round_trip_eq(&v, |a, b| {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b.iter())
-                    .all(|(x, y)| u32::from(*x) == u32::from(*y))
         });
     }
 
