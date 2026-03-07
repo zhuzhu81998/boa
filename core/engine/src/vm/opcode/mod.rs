@@ -136,9 +136,9 @@ impl ByteCodeEmitter {
     }
 
     /// Convert the [`ByteCodeEmitter`] into a [`ByteCode`] instance.
-    pub(crate) fn into_bytecode(self) -> ByteCode {
-        ByteCode {
-            bytecode: self.bytecode.into_boxed_slice(),
+    pub(crate) fn into_bytecode(self) -> Bytecode {
+        Bytecode {
+            bytes: self.bytecode.into_boxed_slice(),
         }
     }
 
@@ -175,8 +175,8 @@ impl ByteCodeEmitter {
 
 #[derive(Clone, Debug, Default)]
 /// The bytecode representation of a codeblock.
-pub(crate) struct ByteCode {
-    pub(crate) bytecode: Box<[u8]>,
+pub(crate) struct Bytecode {
+    pub(crate) bytes: Box<[u8]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -430,7 +430,7 @@ macro_rules! generate_opcodes {
                 #[inline(always)]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
-                    let bytes = &context.vm.frame().code_block.bytecode.bytecode;
+                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
@@ -445,7 +445,7 @@ macro_rules! generate_opcodes {
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
-                    let bytes = &context.vm.frame().code_block.bytecode.bytecode;
+                    let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
@@ -485,10 +485,10 @@ macro_rules! generate_opcodes {
             ),*
         }
 
-        impl ByteCode {
+        impl Bytecode {
             #[allow(unused_parens)]
             pub(crate) fn next_instruction(&self, pc: usize) -> (Instruction, usize) {
-                let bytes = &self.bytecode;
+                let bytes = &self.bytes;
                 let opcode = Opcode::decode(bytes[pc]);
 
                 match opcode {
@@ -511,7 +511,7 @@ macro_rules! generate_opcodes {
 /// Iterator over the instructions in the compact bytecode.
 // #[derive(Debug, Clone)]
 pub(crate) struct InstructionIterator<'bytecode> {
-    bytes: &'bytecode ByteCode,
+    bytes: &'bytecode Bytecode,
     pc: usize,
 }
 
@@ -521,7 +521,7 @@ impl<'bytecode> InstructionIterator<'bytecode> {
     /// Create a new [`InstructionIterator`] from bytecode array.
     #[inline]
     #[must_use]
-    pub(crate) const fn new(bytes: &'bytecode ByteCode) -> Self {
+    pub(crate) const fn new(bytes: &'bytecode Bytecode) -> Self {
         Self { bytes, pc: 0 }
     }
 
@@ -539,11 +539,11 @@ impl Iterator for InstructionIterator<'_> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let start_pc = self.pc;
-        if self.pc >= self.bytes.bytecode.len() {
+        if self.pc >= self.bytes.bytes.len() {
             return None;
         }
 
-        let bytes = &self.bytes.bytecode;
+        let bytes = &self.bytes.bytes;
         let opcode = Opcode::decode(bytes[self.pc]);
         // Get instruction and determine how much to advance pc
         let (instruction, read_size) = self.bytes.next_instruction(self.pc);
