@@ -844,7 +844,10 @@ impl CodeBlock {
                 dst,
                 values_handle,
             } => {
-                let values = self.bytecode.operand_arena.u32_operands(*values_handle);
+                let values = self
+                    .bytecode
+                    .operand_arena
+                    .register_operands(*values_handle);
                 format!("site:{site}, dst:{dst}, values:{values:?}")
             }
             Instruction::GetFunctionObject { function_object } => {

@@ -2199,7 +2199,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Inputs: values
     ///   - Output: dst
-    TemplateCreate { site: u64, dst: RegisterOperand, values_handle: OperandHandle<u32> },
+    TemplateCreate { site: u64, dst: RegisterOperand, values_handle: OperandHandle<RegisterOperand> },
 
     /// Push a private environment.
     ///

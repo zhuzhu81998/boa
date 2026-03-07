@@ -44,7 +44,7 @@ pub(crate) struct TemplateCreate;
 impl TemplateCreate {
     #[inline(always)]
     pub(super) fn operation(
-        (site, dst, values_handle): (u64, RegisterOperand, OperandHandle<u32>),
+        (site, dst, values_handle): (u64, RegisterOperand, OperandHandle<RegisterOperand>),
         context: &mut Context,
     ) {
         let values = context
@@ -53,7 +53,7 @@ impl TemplateCreate {
             .code_block()
             .bytecode
             .operand_arena
-            .u32_operands(values_handle)
+            .register_operands(values_handle)
             .to_vec();
         let count = values.len() / 2;
         let template =
@@ -65,7 +65,7 @@ impl TemplateCreate {
         let mut cooked = true;
         for value in values {
             if cooked {
-                let cooked_value = context.vm.get_register(value as usize);
+                let cooked_value = context.vm.get_register(value.into());
                 template
                     .define_property_or_throw(
                         index,
@@ -78,7 +78,7 @@ impl TemplateCreate {
                     )
                     .expect("should not fail on new array");
             } else {
-                let raw_value = context.vm.get_register(value as usize);
+                let raw_value = context.vm.get_register(value.into());
                 raw_obj
                     .define_property_or_throw(
                         index,

@@ -319,12 +319,12 @@ impl ByteCompiler<'_> {
 
                 let mut values = Vec::with_capacity(count as usize * 2);
                 for r in &part_registers {
-                    values.push(r.index());
+                    values.push(r.variable());
                 }
                 let values_handle = self
                     .bytecode_emitter
                     .operands_arena_mut()
-                    .push_u32_operands(values.into_boxed_slice());
+                    .push_register_operands(values.into_boxed_slice());
                 self.bytecode_emitter
                     .emit_template_create(site, dst.variable(), values_handle);
                 for r in part_registers {
