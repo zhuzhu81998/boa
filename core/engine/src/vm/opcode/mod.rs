@@ -1662,7 +1662,7 @@ generate_opcodes! {
     ///
     /// - Registers:
     ///   - Input: object, source, excluded_keys
-    CopyDataProperties { object: RegisterOperand, source: RegisterOperand, excluded_keys: ThinVec<RegisterOperand> },
+    CopyDataProperties { object: RegisterOperand, source: RegisterOperand, excluded_keys_handle: OperandHandle<RegisterOperand> },
 
     /// Call ToPropertyKey on the value on the stack.
     ///

@@ -6,7 +6,6 @@ use boa_ast::{
     pattern::{ArrayPatternElement, ObjectPatternElement, Pattern},
     property::PropertyName,
 };
-use thin_vec::ThinVec;
 
 impl ByteCompiler<'_> {
     pub(crate) fn compile_declaration_pattern_impl(
@@ -90,14 +89,19 @@ impl ByteCompiler<'_> {
                             self.bytecode_emitter
                                 .emit_push_empty_object(value.variable());
                             let mut excluded_keys =
-                                ThinVec::with_capacity(excluded_keys_registers.len());
+                                Vec::with_capacity(excluded_keys_registers.len());
                             for r in &excluded_keys_registers {
                                 excluded_keys.push(r.variable());
                             }
+
+                            let excluded_keys_handle = self
+                                .bytecode_emitter
+                                .operands_arena_mut()
+                                .push_register_operands(excluded_keys.into_boxed_slice());
                             self.bytecode_emitter.emit_copy_data_properties(
                                 value.variable(),
                                 object.variable(),
-                                excluded_keys,
+                                excluded_keys_handle,
                             );
                             while let Some(r) = excluded_keys_registers.pop() {
                                 self.register_allocator.dealloc(r);
@@ -110,14 +114,18 @@ impl ByteCompiler<'_> {
                             self.bytecode_emitter
                                 .emit_push_empty_object(value.variable());
                             let mut excluded_keys =
-                                ThinVec::with_capacity(excluded_keys_registers.len());
+                                Vec::with_capacity(excluded_keys_registers.len());
                             for r in &excluded_keys_registers {
                                 excluded_keys.push(r.variable());
                             }
+                            let excluded_keys_handle = self
+                                .bytecode_emitter
+                                .operands_arena_mut()
+                                .push_register_operands(excluded_keys.into_boxed_slice());
                             self.bytecode_emitter.emit_copy_data_properties(
                                 value.variable(),
                                 object.variable(),
-                                excluded_keys,
+                                excluded_keys_handle,
                             );
                             while let Some(r) = excluded_keys_registers.pop() {
                                 self.register_allocator.dealloc(r);

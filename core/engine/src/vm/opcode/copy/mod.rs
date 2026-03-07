@@ -1,6 +1,8 @@
 use super::RegisterOperand;
-use crate::{Context, JsResult, vm::opcode::Operation};
-use thin_vec::ThinVec;
+use crate::{
+    Context, JsResult,
+    vm::opcode::{OperandHandle, Operation},
+};
 
 /// `CopyDataProperties` implements the Opcode Operation for `Opcode::CopyDataProperties`
 ///
@@ -12,9 +14,21 @@ pub(crate) struct CopyDataProperties;
 impl CopyDataProperties {
     #[inline(always)]
     pub(super) fn operation(
-        (object, source, keys): (RegisterOperand, RegisterOperand, ThinVec<RegisterOperand>),
+        (object, source, excluded_keys_handle): (
+            RegisterOperand,
+            RegisterOperand,
+            OperandHandle<RegisterOperand>,
+        ),
         context: &mut Context,
     ) -> JsResult<()> {
+        let keys = context
+            .vm
+            .frame()
+            .code_block()
+            .bytecode
+            .operand_arena
+            .register_operands(excluded_keys_handle)
+            .to_vec(); // TODO: to_vec necessary due to to_string needing owned values. we dont actually have to on most branches of to_property_key
         let object = context.vm.get_register(object.into()).clone();
         let source = context.vm.get_register(source.into()).clone();
         let mut excluded_keys = Vec::with_capacity(keys.len());

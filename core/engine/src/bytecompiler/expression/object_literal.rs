@@ -5,7 +5,6 @@ use boa_ast::{
     property::{MethodDefinitionKind, PropertyName},
 };
 use boa_interner::Sym;
-use thin_vec::ThinVec;
 
 impl ByteCompiler<'_> {
     pub(crate) fn compile_object_literal(&mut self, literal: &ObjectLiteral, dst: &Register) {
@@ -114,10 +113,14 @@ impl ByteCompiler<'_> {
                 PropertyDefinition::SpreadObject(expr) => {
                     let source = self.register_allocator.alloc();
                     self.compile_expr(expr, &source);
+                    let excluded_keys_handle = self
+                        .bytecode_emitter
+                        .operands_arena_mut()
+                        .push_register_operands(Vec::new().into_boxed_slice());
                     self.bytecode_emitter.emit_copy_data_properties(
                         dst.variable(),
                         source.variable(),
-                        ThinVec::new(),
+                        excluded_keys_handle,
                     );
                     self.register_allocator.dealloc(source);
                 }

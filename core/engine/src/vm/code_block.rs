@@ -827,8 +827,12 @@ impl CodeBlock {
             Instruction::CopyDataProperties {
                 object,
                 source,
-                excluded_keys,
+                excluded_keys_handle,
             } => {
+                let excluded_keys = self
+                    .bytecode
+                    .operand_arena
+                    .register_operands(*excluded_keys_handle);
                 format!("object:{object}, source:{source}, excluded_keys:{excluded_keys:?}")
             }
             Instruction::TemplateCreate { site, dst, values } => {
