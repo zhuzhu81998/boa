@@ -2200,7 +2200,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Inputs: values
     ///   - Output: dst
-    TemplateCreate { site: u64, dst: RegisterOperand, values: ThinVec<u32> },
+    TemplateCreate { site: u64, dst: RegisterOperand, values_handle: OperandHandle<u32> },
 
     /// Push a private environment.
     ///

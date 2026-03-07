@@ -5,9 +5,8 @@ use crate::{
     js_string,
     object::IntegrityLevel,
     property::PropertyDescriptor,
-    vm::opcode::{Address, Operation},
+    vm::opcode::{Address, OperandHandle, Operation},
 };
-use thin_vec::ThinVec;
 
 /// `TemplateLookup` implements the Opcode Operation for `Opcode::TemplateLookup`
 ///
@@ -45,9 +44,17 @@ pub(crate) struct TemplateCreate;
 impl TemplateCreate {
     #[inline(always)]
     pub(super) fn operation(
-        (site, dst, values): (u64, RegisterOperand, ThinVec<u32>),
+        (site, dst, values_handle): (u64, RegisterOperand, OperandHandle<u32>),
         context: &mut Context,
     ) {
+        let values = context
+            .vm
+            .frame()
+            .code_block()
+            .bytecode
+            .operand_arena
+            .u32_operands(values_handle)
+            .to_vec();
         let count = values.len() / 2;
         let template =
             Array::array_create(count as u64, None, context).expect("cannot fail per spec");

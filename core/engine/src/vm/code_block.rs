@@ -835,7 +835,12 @@ impl CodeBlock {
                     .register_operands(*excluded_keys_handle);
                 format!("object:{object}, source:{source}, excluded_keys:{excluded_keys:?}")
             }
-            Instruction::TemplateCreate { site, dst, values } => {
+            Instruction::TemplateCreate {
+                site,
+                dst,
+                values_handle,
+            } => {
+                let values = self.bytecode.operand_arena.u32_operands(*values_handle);
                 format!("site:{site}, dst:{dst}, values:{values:?}")
             }
             Instruction::GetFunctionObject { function_object } => {

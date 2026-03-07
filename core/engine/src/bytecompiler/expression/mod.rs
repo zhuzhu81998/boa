@@ -21,7 +21,6 @@ use boa_ast::{
         operator::Conditional,
     },
 };
-use thin_vec::ThinVec;
 
 impl ByteCompiler<'_> {
     fn compile_literal(&mut self, lit: &AstLiteral, dst: &Register) {
@@ -318,12 +317,16 @@ impl ByteCompiler<'_> {
                     part_registers.push(value);
                 }
 
-                let mut values = ThinVec::with_capacity(count as usize * 2);
+                let mut values = Vec::with_capacity(count as usize * 2);
                 for r in &part_registers {
                     values.push(r.index());
                 }
+                let values_handle = self
+                    .bytecode_emitter
+                    .operands_arena_mut()
+                    .push_u32_operands(values.into_boxed_slice());
                 self.bytecode_emitter
-                    .emit_template_create(site, dst.variable(), values);
+                    .emit_template_create(site, dst.variable(), values_handle);
                 for r in part_registers {
                     self.register_allocator.dealloc(r);
                 }
