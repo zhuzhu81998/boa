@@ -1,5 +1,7 @@
 use thin_vec::ThinVec;
 
+use crate::vm::opcode::OperandHandle;
+
 use super::{Address, RegisterOperand, VaryingOperand};
 
 /// A trait for types that can be read from a byte slice.
@@ -170,6 +172,17 @@ impl Argument for Address {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (value, pos) = read::<u32>(bytes, pos);
         (Self::new(value), pos)
+    }
+}
+
+impl<T: Argument> Argument for OperandHandle<T> {
+    fn encode(self, bytes: &mut Vec<u8>) {
+        write_u32(bytes, self.index);
+    }
+
+    fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
+        let (index, pos) = read::<u32>(bytes, pos);
+        (Self::new(index), pos)
     }
 }
 

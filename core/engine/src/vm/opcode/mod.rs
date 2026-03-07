@@ -5,7 +5,7 @@ use crate::{
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
 use args::{Argument, read};
-use std::ops::ControlFlow;
+use std::{marker::PhantomData, ops::ControlFlow};
 use thin_vec::ThinVec;
 
 mod args;
@@ -124,52 +124,59 @@ pub(crate) trait Operation {
 /// The compile time representation of bytecode instructions.
 #[derive(Debug)]
 pub(crate) struct BytecodeEmitter {
-    bytecode: Vec<u8>,
+    bytes: Vec<u8>,
+    operand_arena: OperandArena,
 }
 
 impl BytecodeEmitter {
     /// Create a new [`ByteCodeEmitter`] instance.
     pub(crate) fn new() -> Self {
         Self {
-            bytecode: Vec::new(),
+            bytes: Vec::new(),
+            operand_arena: OperandArena::default(),
         }
     }
 
     /// Convert the [`ByteCodeEmitter`] into a [`ByteCode`] instance.
     pub(crate) fn into_bytecode(self) -> Bytecode {
         Bytecode {
-            bytes: self.bytecode.into_boxed_slice(),
+            bytes: self.bytes.into_boxed_slice(),
+            operand_arena: self.operand_arena,
         }
     }
 
     /// Get the location of the next opcode in the bytecode.
     pub(crate) fn next_opcode_location(&self) -> Address {
-        Address::new(self.bytecode.len() as u32)
+        Address::new(self.bytes.len() as u32)
     }
 
     /// Patch the jump instruction at the given label with the given address.
     pub(crate) fn patch_jump(&mut self, label: Address, patch: Address) {
         let pos = u32::from(label) as usize;
         let bytes = u32::from(patch).to_le_bytes();
-        self.bytecode[pos + 1] = bytes[0];
-        self.bytecode[pos + 2] = bytes[1];
-        self.bytecode[pos + 3] = bytes[2];
-        self.bytecode[pos + 4] = bytes[3];
+        self.bytes[pos + 1] = bytes[0];
+        self.bytes[pos + 2] = bytes[1];
+        self.bytes[pos + 3] = bytes[2];
+        self.bytes[pos + 4] = bytes[3];
     }
 
     /// Patch the jump instruction at the given label with jump table addresses.
     pub(crate) fn patch_jump_table(&mut self, label: Address, patch: &[Address]) {
         let length_offset = u32::from(label) as usize + 1;
 
-        let (length, first_offset) = read::<u32>(&self.bytecode, length_offset);
+        let (length, first_offset) = read::<u32>(&self.bytes, length_offset);
         assert_eq!(length as usize, patch.len());
 
         // Write patched address values.
         for (i, value) in patch.iter().enumerate() {
             let offset = first_offset + i * size_of::<u32>();
-            self.bytecode[offset..offset + size_of::<u32>()]
+            self.bytes[offset..offset + size_of::<u32>()]
                 .copy_from_slice(&u32::from(*value).to_le_bytes());
         }
+    }
+
+    pub(crate) fn operands_arena_mut(&mut self) -> &mut OperandArena {
+        &mut self.operand_arena
     }
 }
 
@@ -177,6 +184,58 @@ impl BytecodeEmitter {
 /// The bytecode representation of a codeblock.
 pub(crate) struct Bytecode {
     pub(crate) bytes: Box<[u8]>,
+    /// Store arrays of operands that are used in some instructions.
+    /// This arena approach decouples the operands from `Bytecode.bytes`
+    pub(crate) operand_arena: OperandArena,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OperandArena {
+    register_operands: Vec<Box<[RegisterOperand]>>,
+    address_operands: Vec<Box<[Address]>>,
+    u32_operands: Vec<Box<[u32]>>,
+}
+impl OperandArena {
+    pub(crate) fn push_register_operands(
+        &mut self,
+        values: Box<[RegisterOperand]>,
+    ) -> OperandHandle<RegisterOperand> {
+        let index = self.register_operands.len() as u32;
+        self.register_operands.push(values);
+        OperandHandle::new(index)
+    }
+
+    pub(crate) fn push_address_operands(
+        &mut self,
+        values: Box<[Address]>,
+    ) -> OperandHandle<Address> {
+        let index = self.address_operands.len() as u32;
+        self.address_operands.push(values);
+        OperandHandle::new(index)
+    }
+
+    pub(crate) fn push_u32_operands(&mut self, values: Box<[u32]>) -> OperandHandle<u32> {
+        let index = self.u32_operands.len() as u32;
+        self.u32_operands.push(values);
+        OperandHandle::new(index)
+    }
+}
+
+impl OperandArena {
+    pub(crate) fn register_operands(
+        &self,
+        handle: OperandHandle<RegisterOperand>,
+    ) -> &[RegisterOperand] {
+        &self.register_operands[handle.index() as usize]
+    }
+
+    pub(crate) fn address_operands(&self, handle: OperandHandle<Address>) -> &[Address] {
+        &self.address_operands[handle.index() as usize]
+    }
+
+    pub(crate) fn u32_operands(&self, handle: OperandHandle<u32>) -> &[u32] {
+        &self.u32_operands[handle.index() as usize]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -340,6 +399,26 @@ impl Opcode {
     }
 }
 
+/// Handle to an operand array in the operand arena.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct OperandHandle<T> {
+    index: u32,
+    _marker: PhantomData<T>,
+}
+
+impl<T> OperandHandle<T> {
+    pub(crate) const fn new(index: u32) -> Self {
+        Self {
+            index,
+            _marker: PhantomData::<T>,
+        }
+    }
+
+    pub(crate) const fn index(self) -> u32 {
+        self.index
+    }
+}
+
 fn encode_instruction<A: Argument>(opcode: Opcode, args: A, bytes: &mut Vec<u8>) {
     bytes.push(opcode.encode());
     args.encode(bytes);
@@ -398,7 +477,7 @@ macro_rules! generate_opcodes {
                         encode_instruction(
                             Opcode::$Variant,
                             ($($($FieldName),*)?),
-                            &mut self.bytecode,
+                            &mut self.bytes,
                         );
                     }
                 }
