@@ -123,11 +123,11 @@ pub(crate) trait Operation {
 
 /// The compile time representation of bytecode instructions.
 #[derive(Debug)]
-pub(crate) struct ByteCodeEmitter {
+pub(crate) struct BytecodeEmitter {
     bytecode: Vec<u8>,
 }
 
-impl ByteCodeEmitter {
+impl BytecodeEmitter {
     /// Create a new [`ByteCodeEmitter`] instance.
     pub(crate) fn new() -> Self {
         Self {
@@ -390,7 +390,7 @@ macro_rules! generate_opcodes {
             }
         }
 
-        impl ByteCodeEmitter {
+        impl BytecodeEmitter {
             $(
                 paste::paste! {
                     #[allow(unused)]
