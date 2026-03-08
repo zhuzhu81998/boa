@@ -69,7 +69,7 @@ impl ByteCompiler<'_> {
                     if self.is_async_generator() {
                         let value = self.register_allocator.alloc();
                         self.compile_expr(expr, &value);
-                        self.bytecode.emit_await(value.variable());
+                        self.bytecode_emitter.emit_await(value.variable());
                         let resume_kind = self.register_allocator.alloc();
                         self.pop_into_register(&resume_kind);
                         self.pop_into_register(&value);

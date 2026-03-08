@@ -2535,7 +2535,7 @@ impl<'ctx> ByteCompiler<'ctx> {
         }
         match dst {
             CallResultDest::Register(dst) => compiler.pop_into_register(dst),
-            CallResultDest::Discard => compiler.bytecode.emit_pop(),
+            CallResultDest::Discard => compiler.bytecode_emitter.emit_pop(),
             CallResultDest::Stack => {} // leave result on stack
         }
     }
