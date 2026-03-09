@@ -18,8 +18,7 @@ impl New {
 
         let cons = func
             .as_object()
-            .ok_or_else(|| JsNativeError::typ().with_message("not a constructor"))?
-            .clone();
+            .ok_or_else(|| JsNativeError::typ().with_message("not a constructor"))?;
 
         context.vm.stack.push(cons.clone()); // Push new.target
 
@@ -59,8 +58,7 @@ impl NewSpread {
 
         let cons = func
             .as_object()
-            .ok_or_else(|| JsNativeError::typ().with_message("not a constructor"))?
-            .clone();
+            .ok_or_else(|| JsNativeError::typ().with_message("not a constructor"))?;
 
         let argument_count = arguments.len();
         context.vm.stack.push(func);
