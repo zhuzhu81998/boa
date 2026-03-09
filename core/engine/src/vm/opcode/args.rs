@@ -38,7 +38,7 @@ unsafe impl Readable for (u32, u32, u32, u32, u32) {}
 pub(super) fn read<T: Readable>(bytes: &[u8], offset: usize) -> (T, usize) {
     let new_offset = offset + size_of::<T>();
 
-    assert!(bytes.len() >= new_offset, "buffer too small to read type T");
+    debug_assert!(bytes.len() >= new_offset, "buffer too small to read type T");
 
     // Safety: The assertion above ensures that the slice is large enough to read T.
     let result = unsafe { read_unchecked(bytes, offset) };
@@ -58,6 +58,9 @@ unsafe fn read_unchecked<T: Readable>(bytes: &[u8], offset: usize) -> T {
 }
 
 pub(crate) trait Argument: Sized + std::fmt::Debug {
+    /// Return the number of bytes needed to encode the argument.
+    fn encoded_size(&self) -> usize;
+
     /// Encode the argument into a byte slice
     fn encode(self, bytes: &mut Vec<u8>);
 
@@ -68,12 +71,14 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
 
 #[inline(always)]
 fn write_u8(bytes: &mut Vec<u8>, value: u8) {
-    bytes.extend_from_slice(&value.to_le_bytes());
+    bytes.push(value);
 }
 
 #[inline(always)]
 fn write_i8(bytes: &mut Vec<u8>, value: i8) {
-    bytes.extend_from_slice(&value.to_le_bytes());
+    // https://doc.rust-lang.org/reference/expressions/operator-expr.html#numeric-cast
+    // i8 to u8 is no-op
+    bytes.push(value as u8);
 }
 
 #[inline(always)]
@@ -110,6 +115,10 @@ fn write_f64(bytes: &mut Vec<u8>, value: f64) {
 }
 
 impl<T: Argument> Argument for ThinVec<T> {
+    fn encoded_size(&self) -> usize {
+        size_of::<u32>() + self.iter().map(Argument::encoded_size).sum::<usize>()
+    }
+
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.len() as u32);
         for arg in self {
@@ -131,6 +140,10 @@ impl<T: Argument> Argument for ThinVec<T> {
 }
 
 impl Argument for () {
+    fn encoded_size(&self) -> usize {
+        0
+    }
+
     fn encode(self, _: &mut Vec<u8>) {}
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
@@ -139,6 +152,10 @@ impl Argument for () {
 }
 
 impl Argument for VaryingOperand {
+    fn encoded_size(&self) -> usize {
+        size_of::<u32>()
+    }
+
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
     }
@@ -150,6 +167,10 @@ impl Argument for VaryingOperand {
 }
 
 impl Argument for RegisterOperand {
+    fn encoded_size(&self) -> usize {
+        size_of::<u32>()
+    }
+
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
     }
@@ -161,6 +182,10 @@ impl Argument for RegisterOperand {
 }
 
 impl Argument for Address {
+    fn encoded_size(&self) -> usize {
+        size_of::<u32>()
+    }
+
     #[inline(always)]
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.value);
@@ -176,6 +201,12 @@ impl Argument for Address {
 macro_rules! impl_argument_for_tuple {
     ($( $i: ident  $t: ident ),*) => {
         impl<$( $t: Argument, )*> Argument for ($( $t, )*) {
+            #[inline(always)]
+            fn encoded_size(&self) -> usize {
+                let ($($i, )*) = self;
+                0 $(+ $i.encoded_size())*
+            }
+
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 let ($($i, )*) = self;
@@ -201,6 +232,11 @@ macro_rules! impl_argument_for_int {
     ($( $t: ty )*) => {
         $(
         impl Argument for $t {
+            #[inline(always)]
+            fn encoded_size(&self) -> usize {
+                size_of::<$t>()
+            }
+
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 paste::paste! {
@@ -325,16 +361,35 @@ mod tests {
     #[test]
     fn test_encoded_size_matches_type_size() {
         let mut bytes = Vec::new();
+        assert_eq!(Address::new(0xDEAD_BEEF).encoded_size(), size_of::<u32>());
         Address::new(0xDEAD_BEEF).encode(&mut bytes);
         assert_eq!(bytes.len(), size_of::<u32>());
 
         bytes.clear();
+        assert_eq!((0u64).encoded_size(), size_of::<u64>());
         (0u64).encode(&mut bytes);
         assert_eq!(bytes.len(), size_of::<u64>());
 
         bytes.clear();
+        assert_eq!((0.0f64).encoded_size(), size_of::<f64>());
         (0.0f64).encode(&mut bytes);
         assert_eq!(bytes.len(), size_of::<f64>());
+    }
+
+    #[test]
+    fn test_dynamic_encoded_size_matches_bytes_len() {
+        let value: ThinVec<(RegisterOperand, u32)> = [
+            (RegisterOperand::new(0), 1u32),
+            (RegisterOperand::new(1), 2u32),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut bytes = Vec::new();
+        let encoded_size = value.encoded_size();
+        value.encode(&mut bytes);
+
+        assert_eq!(encoded_size, bytes.len());
     }
 
     #[test]

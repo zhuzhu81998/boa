@@ -338,6 +338,7 @@ impl Opcode {
 }
 
 fn encode_instruction<A: Argument>(opcode: Opcode, args: A, bytes: &mut Vec<u8>) {
+    bytes.reserve(1 + args.encoded_size());
     bytes.push(opcode.encode());
     args.encode(bytes);
 }
