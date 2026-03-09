@@ -15,7 +15,6 @@ use boa_ast::{
 };
 use boa_gc::Gc;
 use boa_interner::Sym;
-use thin_vec::ThinVec;
 
 // Static class elements that are initialized at a later time in the class creation.
 enum StaticElement {
@@ -185,7 +184,7 @@ impl ByteCompiler<'_> {
         );
         self.register_allocator.dealloc(prototype_register);
 
-        let mut name_indices = ThinVec::new();
+        let mut name_indices = Vec::new();
         for element in class.elements {
             match element {
                 ClassElement::MethodDefinition(m) => {

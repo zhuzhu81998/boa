@@ -16,7 +16,6 @@ use crate::{
 };
 use bitflags::bitflags;
 use boa_interner::Sym;
-use thin_vec::thin_vec;
 
 /// An actions to be performed for the local control flow.
 #[derive(Debug, Clone, Copy)]
@@ -610,7 +609,7 @@ impl ByteCompiler<'_> {
         let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
         self.bytecode.emit_jump_table(
             finally_throw_index,
-            thin_vec![Self::DUMMY_ADDRESS; info.jumps.len()],
+            vec![Self::DUMMY_ADDRESS; info.jumps.len()],
         );
 
         // We are assuming any indices outside our jump table will fallback

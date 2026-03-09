@@ -1,5 +1,3 @@
-use thin_vec::ThinVec;
-
 use super::{Address, RegisterOperand, VaryingOperand};
 
 /// A trait for types that can be read from a byte slice.
@@ -109,7 +107,7 @@ fn write_f64(bytes: &mut Vec<u8>, value: f64) {
     bytes.extend_from_slice(&value.to_bits().to_le_bytes());
 }
 
-impl<T: Argument> Argument for ThinVec<T> {
+impl<T: Argument> Argument for Vec<T> {
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.len() as u32);
         for arg in self {
@@ -120,7 +118,7 @@ impl<T: Argument> Argument for ThinVec<T> {
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize) {
         let (len, mut pos) = read::<u32>(bytes, pos);
         let total_len = len as usize;
-        let mut result = ThinVec::with_capacity(total_len);
+        let mut result = Vec::with_capacity(total_len);
         for _ in 0..total_len {
             let (arg, new_pos) = T::decode(bytes, pos);
             result.push(arg);
@@ -223,7 +221,6 @@ impl_argument_for_int!(u8 u16 u32 u64 i8 i16 i32 f32 f64);
 mod tests {
     use super::{Address, Argument, RegisterOperand, VaryingOperand};
     use std::mem::size_of;
-    use thin_vec::ThinVec;
 
     fn round_trip<T: Argument + PartialEq + Clone>(value: &T) {
         let mut bytes = Vec::new();
@@ -306,12 +303,12 @@ mod tests {
     }
 
     #[test]
-    fn test_thin_vec_round_trip() {
-        let v: ThinVec<u32> = ThinVec::new();
+    fn test_vec_round_trip() {
+        let v: Vec<u32> = Vec::new();
         round_trip(&v);
-        let v: ThinVec<u32> = [1u32, 2, 3].into_iter().collect();
+        let v: Vec<u32> = [1u32, 2, 3].into_iter().collect();
         round_trip(&v);
-        let v: ThinVec<RegisterOperand> = [RegisterOperand::new(0), RegisterOperand::new(1)]
+        let v: Vec<RegisterOperand> = [RegisterOperand::new(0), RegisterOperand::new(1)]
             .into_iter()
             .collect();
         round_trip_eq(&v, |a, b| {

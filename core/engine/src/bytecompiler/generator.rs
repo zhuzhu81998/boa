@@ -1,5 +1,3 @@
-use thin_vec::thin_vec;
-
 use crate::{
     bytecompiler::{ByteCompiler, Label, Register},
     js_string,
@@ -12,7 +10,7 @@ impl ByteCompiler<'_> {
         let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
         self.bytecode.emit_jump_table(
             resume_kind.index(),
-            thin_vec![
+            vec![
                 Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
                 Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
                                      // GeneratorResumeKind::Return is the default case
@@ -50,7 +48,7 @@ impl ByteCompiler<'_> {
         let jump_table_index = self.next_opcode_location() + size_of::<u32>() as u32;
         self.bytecode.emit_jump_table(
             resume_kind.index(),
-            thin_vec![
+            vec![
                 Self::DUMMY_ADDRESS, // GeneratorResumeKind::Normal
                 Self::DUMMY_ADDRESS, // GeneratorResumeKind::Throw
                                      // GeneratorResumeKind::Return is the default case

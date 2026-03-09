@@ -2,7 +2,6 @@ use crate::{
     Context, JsResult,
     vm::opcode::{Address, Operation, RegisterOperand},
 };
-use thin_vec::ThinVec;
 
 /// `Jump` implements the Opcode Operation for `Opcode::Jump`
 ///
@@ -296,7 +295,7 @@ pub(crate) struct JumpTable;
 
 impl JumpTable {
     #[inline(always)]
-    pub(crate) fn operation((index, addresses): (u32, ThinVec<Address>), context: &mut Context) {
+    pub(crate) fn operation((index, addresses): (u32, Vec<Address>), context: &mut Context) {
         let value = context.vm.get_register(index as usize);
         let Some(offset) = value.as_i32().map(|i| i as usize) else {
             return;

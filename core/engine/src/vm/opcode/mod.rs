@@ -6,7 +6,6 @@ use crate::{
 };
 use args::{Argument, read};
 use std::ops::ControlFlow;
-use thin_vec::ThinVec;
 
 mod args;
 
@@ -1584,7 +1583,7 @@ generate_opcodes! {
     ///
     /// - Registers:
     ///   - Input: object, source, excluded_keys
-    CopyDataProperties { object: RegisterOperand, source: RegisterOperand, excluded_keys: ThinVec<RegisterOperand> },
+    CopyDataProperties { object: RegisterOperand, source: RegisterOperand, excluded_keys: Vec<RegisterOperand> },
 
     /// Call ToPropertyKey on the value on the stack.
     ///
@@ -1700,7 +1699,7 @@ generate_opcodes! {
     /// that has finally block.
     ///
     /// Operands: index: Register, count: `u32`, address: `Address` * count
-    JumpTable { index: u32, addresses: ThinVec<Address> },
+    JumpTable { index: u32, addresses: Vec<Address> },
 
     /// Throw exception.
     ///
@@ -2042,7 +2041,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Input: values
     ///   - Output: dst
-    ConcatToString { dst: RegisterOperand, values: ThinVec<RegisterOperand> },
+    ConcatToString { dst: RegisterOperand, values: Vec<RegisterOperand> },
 
     /// Require the stack value to be neither null nor undefined.
     ///
@@ -2116,7 +2115,7 @@ generate_opcodes! {
     /// - Registers:
     ///   - Inputs: values
     ///   - Output: dst
-    TemplateCreate { site: u64, dst: RegisterOperand, values: ThinVec<u32> },
+    TemplateCreate { site: u64, dst: RegisterOperand, values: Vec<u32> },
 
     /// Push a private environment.
     ///
@@ -2124,7 +2123,7 @@ generate_opcodes! {
     ///
     /// - Registers:
     ///   - Input: class, name_indices
-    PushPrivateEnvironment { class: RegisterOperand, name_indices: ThinVec<u32> },
+    PushPrivateEnvironment { class: RegisterOperand, name_indices: Vec<u32> },
 
     /// Pop a private environment.
     PopPrivateEnvironment,

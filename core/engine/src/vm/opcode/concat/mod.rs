@@ -1,6 +1,5 @@
 use super::RegisterOperand;
 use crate::{Context, JsResult, JsString, vm::opcode::Operation};
-use thin_vec::ThinVec;
 
 /// `ConcatToString` implements the Opcode Operation for `Opcode::ConcatToString`
 ///
@@ -12,7 +11,7 @@ pub(crate) struct ConcatToString;
 impl ConcatToString {
     #[inline(always)]
     pub(super) fn operation(
-        (string, values): (RegisterOperand, ThinVec<RegisterOperand>),
+        (string, values): (RegisterOperand, Vec<RegisterOperand>),
 
         context: &mut Context,
     ) -> JsResult<()> {

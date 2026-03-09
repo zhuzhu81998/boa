@@ -7,7 +7,6 @@ use crate::{
     property::PropertyDescriptor,
     vm::opcode::{Address, Operation},
 };
-use thin_vec::ThinVec;
 
 /// `TemplateLookup` implements the Opcode Operation for `Opcode::TemplateLookup`
 ///
@@ -45,7 +44,7 @@ pub(crate) struct TemplateCreate;
 impl TemplateCreate {
     #[inline(always)]
     pub(super) fn operation(
-        (site, dst, values): (u64, RegisterOperand, ThinVec<u32>),
+        (site, dst, values): (u64, RegisterOperand, Vec<u32>),
         context: &mut Context,
     ) {
         let count = values.len() / 2;

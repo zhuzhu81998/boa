@@ -5,7 +5,6 @@ use crate::{
     vm::opcode::{Operation, RegisterOperand, VaryingOperand},
 };
 use boa_gc::Gc;
-use thin_vec::ThinVec;
 
 /// `PushScope` implements the Opcode Operation for `Opcode::PushScope`
 ///
@@ -65,7 +64,7 @@ pub(crate) struct PushPrivateEnvironment;
 impl PushPrivateEnvironment {
     #[inline(always)]
     pub(crate) fn operation(
-        (class, name_indices): (RegisterOperand, ThinVec<u32>),
+        (class, name_indices): (RegisterOperand, Vec<u32>),
         context: &mut Context,
     ) {
         let class = context.vm.get_register(class.into());
