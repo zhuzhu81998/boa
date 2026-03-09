@@ -59,7 +59,7 @@ impl BorrowFlag {
     ///  - This method will panic after incrementing if the borrow count overflows.
     #[inline]
     fn add_reading(self) -> Self {
-        assert!(self.borrowed() != BorrowState::Writing);
+        assert!(self.0 != WRITING);
         let flags = Self(self.0 + 1);
 
         // This will fail if the borrow count overflows, which shouldn't happen,
@@ -156,7 +156,7 @@ impl<T: ?Sized> GcRefCell<T> {
     ///
     /// Returns an `Err` if the value is currently mutably borrowed.
     pub fn try_borrow(&self) -> Result<GcRef<'_, T>, BorrowError> {
-        if self.borrow.get().borrowed() == BorrowState::Writing {
+        if self.borrow.get().0 == WRITING {
             return Err(BorrowError);
         }
         self.borrow.set(self.borrow.get().add_reading());
@@ -183,7 +183,7 @@ impl<T: ?Sized> GcRefCell<T> {
     ///
     /// Returns an `Err` if the value is currently borrowed.
     pub fn try_borrow_mut(&self) -> Result<GcRefMut<'_, T>, BorrowMutError> {
-        if self.borrow.get().borrowed() != BorrowState::Unused {
+        if self.borrow.get().0 != UNUSED {
             return Err(BorrowMutError);
         }
         self.borrow.set(self.borrow.get().set_writing());
@@ -230,27 +230,30 @@ impl<T: Trace + ?Sized> Finalize for GcRefCell<T> {}
 // on GcCell's value may cause Undefined Behavior
 unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        match self.borrow.get().borrowed() {
-            BorrowState::Writing => (),
+        if self.borrow.get().0 == WRITING {
+            ()
+        } else {
             // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).trace(tracer) },
+            unsafe { (*self.cell.get()).trace(tracer) }
         }
     }
 
     unsafe fn trace_non_roots(&self) {
-        match self.borrow.get().borrowed() {
-            BorrowState::Writing => (),
+        if self.borrow.get().0 == WRITING {
+            ()
+        } else {
             // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).trace_non_roots() },
+            unsafe { (*self.cell.get()).trace_non_roots() }
         }
     }
 
     fn run_finalizer(&self) {
         Finalize::finalize(self);
-        match self.borrow.get().borrowed() {
-            BorrowState::Writing => (),
+        if self.borrow.get().0 == WRITING {
+            ()
+        } else {
             // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).run_finalizer() },
+            unsafe { (*self.cell.get()).run_finalizer() }
         }
     }
 }
@@ -411,7 +414,7 @@ struct BorrowGcRefMut<'a> {
 
 impl Drop for BorrowGcRefMut<'_> {
     fn drop(&mut self) {
-        debug_assert!(self.borrow.get().borrowed() == BorrowState::Writing);
+        debug_assert!(self.borrow.get().0 != WRITING);
         self.borrow.set(BorrowFlag(UNUSED));
     }
 }
@@ -579,17 +582,16 @@ impl<T: ?Sized + Ord> Ord for GcRefCell<T> {
 
 impl<T: ?Sized + Debug> Debug for GcRefCell<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.borrow.get().borrowed() {
-            BorrowState::Unused | BorrowState::Reading => f
-                .debug_struct("GcCell")
-                .field("flags", &self.borrow.get())
-                .field("value", &self.borrow())
-                .finish_non_exhaustive(),
-            BorrowState::Writing => f
-                .debug_struct("GcCell")
+        if self.borrow.get().0 == WRITING {
+            f.debug_struct("GcCell")
                 .field("flags", &self.borrow.get())
                 .field("value", &"<borrowed>")
-                .finish_non_exhaustive(),
+                .finish_non_exhaustive()
+        } else {
+            f.debug_struct("GcCell")
+                .field("flags", &self.borrow.get())
+                .field("value", &self.borrow())
+                .finish_non_exhaustive()
         }
     }
 }
