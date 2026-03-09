@@ -72,7 +72,7 @@ impl GetNameGlobal {
                 drop(object_borrowed);
                 if slot.attributes.has_get() && result.is_object() {
                     result = result.as_object().expect("should contain getter").call(
-                        &object.clone().into(),
+                        &object.into(),
                         &[],
                         context,
                     )?;
