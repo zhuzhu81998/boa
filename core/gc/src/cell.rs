@@ -414,7 +414,7 @@ struct BorrowGcRefMut<'a> {
 
 impl Drop for BorrowGcRefMut<'_> {
     fn drop(&mut self) {
-        debug_assert!(self.borrow.get().0 != WRITING);
+        debug_assert!(self.borrow.get().0 == WRITING);
         self.borrow.set(BorrowFlag(UNUSED));
     }
 }
