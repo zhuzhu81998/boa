@@ -159,8 +159,8 @@ pub(crate) struct PushFromRegister;
 
 impl PushFromRegister {
     #[inline(always)]
-    pub(crate) fn operation(dst: RegisterOperand, context: &mut Context) {
-        let value = context.vm.get_register(dst.into());
+    pub(crate) fn operation(src: RegisterOperand, context: &mut Context) {
+        let value = context.vm.get_register(src.into());
         context.vm.stack.push(value.clone());
     }
 }
