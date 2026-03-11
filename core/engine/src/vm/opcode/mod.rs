@@ -419,25 +419,28 @@ macro_rules! generate_opcodes {
                 #[inline(always)]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord, Opcode> {
+                    // Order of operations very important here. (e.g. some operations may change pc too)
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
-
-                    let next_opcode = match bytes
-                        .get(next_pc)
-                        .map(|byte| Opcode::decode(*byte))
-                    {
-                        Some(opcode) => opcode,
-                        None => {
-                            return ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(JsNativeError::error())));
-                        }
-                    };
 
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
 
                     let completion_record = IntoCompletionRecord::into_completion_record(result, context);
                     match completion_record {
-                        ControlFlow::Continue(()) => ControlFlow::Continue(next_opcode),
+                        ControlFlow::Continue(()) => {
+                            let frame = context.vm.frame();
+                            let pc = frame.pc as usize;
+                            let next_opcode = match frame.code_block.bytecode.bytes.get(pc) {
+                                Some(byte) => Opcode::decode(*byte),
+                                None => {
+                                    return ControlFlow::Break(
+                                        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+                                    );
+                                }
+                            };
+                            ControlFlow::Continue(next_opcode)
+                        },
                         ControlFlow::Break(value) => ControlFlow::Break(value),
                     }
                 }
@@ -453,22 +456,24 @@ macro_rules! generate_opcodes {
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
 
-                    let next_opcode = match bytes
-                        .get(next_pc)
-                        .map(|byte| Opcode::decode(*byte))
-                    {
-                        Some(opcode) => opcode,
-                        None => {
-                            return ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(JsNativeError::error())));
-                        }
-                    };
-
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
 
                     let completion_record = IntoCompletionRecord::into_completion_record(result, context);
                     match completion_record {
-                        ControlFlow::Continue(()) => ControlFlow::Continue(next_opcode),
+                        ControlFlow::Continue(()) => {
+                            let frame = context.vm.frame();
+                            let pc = frame.pc as usize;
+                            let next_opcode = match frame.code_block.bytecode.bytes.get(pc) {
+                                Some(byte) => Opcode::decode(*byte),
+                                None => {
+                                    return ControlFlow::Break(
+                                        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+                                    );
+                                }
+                            };
+                            ControlFlow::Continue(next_opcode)
+                        },
                         ControlFlow::Break(value) => ControlFlow::Break(value),
                     }
                 }
