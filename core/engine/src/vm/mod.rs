@@ -882,11 +882,9 @@ impl Context {
         };
 
         loop {
-            let frame = self.vm.frame();
-            let pc = frame.pc as usize;
-
             match self.execute_one(
                 |context, opcode| {
+                    let pc = context.vm.frame().pc as usize;
                     OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, &mut runtime_budget)
                 },
                 opcode,
@@ -925,11 +923,11 @@ impl Context {
         };
 
         loop {
-            let frame = self.vm.frame();
-            let pc = frame.pc as usize;
-
             match self.execute_one(
-                |context, opcode| OPCODE_HANDLERS[opcode as usize](context, pc),
+                |context, opcode| {
+                    let pc = context.vm.frame().pc as usize;
+                    OPCODE_HANDLERS[opcode as usize](context, pc)
+                },
                 opcode,
             ) {
                 ControlFlow::Continue(next_opcode) => {
