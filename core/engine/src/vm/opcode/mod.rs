@@ -1,7 +1,7 @@
 #![allow(clippy::inline_always)]
 #![allow(clippy::doc_markdown)]
 use crate::{
-    Context, JsError, JsNativeError,
+    Context,
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
 use args::{Argument, read};
@@ -334,6 +334,39 @@ fn encode_instruction<A: Argument>(opcode: Opcode, args: A, bytes: &mut Vec<u8>)
     args.encode(bytes);
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct OpcodeHandler(
+    pub(crate) fn(&mut Context, usize) -> ControlFlow<CompletionRecord, OpcodeHandler>,
+);
+
+#[derive(Clone, Copy)]
+pub(crate) struct OpcodeHandlerBudget(
+    pub(crate) fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget>,
+);
+
+impl OpcodeHandler {
+    #[inline(always)]
+    pub(crate) fn call(
+        self,
+        context: &mut Context,
+        pc: usize,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandler> {
+        (self.0)(context, pc)
+    }
+}
+
+impl OpcodeHandlerBudget {
+    #[inline(always)]
+    pub(crate) fn call(
+        self,
+        context: &mut Context,
+        pc: usize,
+        budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
+        (self.0)(context, pc, budget)
+    }
+}
+
 macro_rules! generate_opcodes {
     (
         $(
@@ -394,22 +427,18 @@ macro_rules! generate_opcodes {
             )*
         }
 
-        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord, Opcode>;
-
         pub(crate) const OPCODE_HANDLERS: [OpcodeHandler; 256] = {
             [
                 $(
-                    paste::paste! { [<handle_ $Variant:snake>] },
+                    paste::paste! { OpcodeHandler([<handle_ $Variant:snake>]) },
                 )*
             ]
         };
 
-        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord, Opcode>;
-
         pub(crate) const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
             [
                 $(
-                    paste::paste! { [<handle_ $Variant:snake _budget>] },
+                    paste::paste! { OpcodeHandlerBudget([<handle_ $Variant:snake _budget>]) },
                 )*
             ]
         };
@@ -418,7 +447,7 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord, Opcode> {
+                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord, OpcodeHandler> {
                     // Order of operations very important here. (e.g. some operations may change pc too)
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
@@ -428,19 +457,7 @@ macro_rules! generate_opcodes {
 
                     let completion_record = IntoCompletionRecord::into_completion_record(result, context);
                     match completion_record {
-                        ControlFlow::Continue(()) => {
-                            let frame = context.vm.frame();
-                            let pc = frame.pc as usize;
-                            let next_opcode = match frame.code_block.bytecode.bytes.get(pc) {
-                                Some(byte) => Opcode::decode(*byte),
-                                None => {
-                                    return ControlFlow::Break(
-                                        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
-                                    );
-                                }
-                            };
-                            ControlFlow::Continue(next_opcode)
-                        },
+                        ControlFlow::Continue(()) => context.next_opcode_handler(),
                         ControlFlow::Break(value) => ControlFlow::Break(value),
                     }
                 }
@@ -451,7 +468,7 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord, Opcode> {
+                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
@@ -461,19 +478,7 @@ macro_rules! generate_opcodes {
 
                     let completion_record = IntoCompletionRecord::into_completion_record(result, context);
                     match completion_record {
-                        ControlFlow::Continue(()) => {
-                            let frame = context.vm.frame();
-                            let pc = frame.pc as usize;
-                            let next_opcode = match frame.code_block.bytecode.bytes.get(pc) {
-                                Some(byte) => Opcode::decode(*byte),
-                                None => {
-                                    return ControlFlow::Break(
-                                        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
-                                    );
-                                }
-                            };
-                            ControlFlow::Continue(next_opcode)
-                        },
+                        ControlFlow::Continue(()) => context.next_opcode_handler_budget(),
                         ControlFlow::Break(value) => ControlFlow::Break(value),
                     }
                 }

@@ -12,7 +12,7 @@ use crate::{
     object::JsFunction,
     realm::Realm,
     script::Script,
-    vm::opcode::{OPCODE_HANDLERS, OPCODE_HANDLERS_BUDGET},
+    vm::opcode::{OPCODE_HANDLERS, OPCODE_HANDLERS_BUDGET, OpcodeHandler, OpcodeHandlerBudget},
 };
 use boa_gc::{Finalize, Gc, Trace, custom_trace};
 use shadow_stack::ShadowStack;
@@ -624,24 +624,15 @@ impl Context {
         );
     }
 
-    fn trace_execute_instruction<F>(
+    fn trace_execute_instruction(
         &mut self,
-        f: F,
-        opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord, Opcode>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
-    {
+        handler: OpcodeHandler,
+        pc: usize,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandler> {
         let frame = self.vm.frame();
-        let (instruction, _) = frame
-            .code_block
-            .bytecode
-            .next_instruction(frame.pc as usize);
-        let operands = self
-            .vm
-            .frame()
-            .code_block()
-            .instruction_operands(&instruction);
+        let (instruction, _) = frame.code_block.bytecode.next_instruction(pc);
+        let opcode = Opcode::decode(frame.code_block.bytecode.bytes[pc]);
+        let operands = frame.code_block().instruction_operands(&instruction);
 
         match opcode {
             Opcode::Call
@@ -660,7 +651,7 @@ impl Context {
         }
 
         let instant = Instant::now();
-        let result = self.execute_instruction(f, opcode);
+        let result = self.execute_instruction(handler, pc);
         let duration = instant.elapsed();
 
         let stack = self
@@ -671,7 +662,55 @@ impl Context {
         println!(
             "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {operands:<OPERAND_COLUMN_WIDTH$} {stack}",
             format!("{}μs", duration.as_micros()),
-            format!("{}", opcode.as_str()),
+            opcode.as_str(),
+            TIME_COLUMN_WIDTH = Self::TIME_COLUMN_WIDTH,
+            OPCODE_COLUMN_WIDTH = Self::OPCODE_COLUMN_WIDTH,
+            OPERAND_COLUMN_WIDTH = Self::OPERAND_COLUMN_WIDTH,
+        );
+
+        result
+    }
+
+    fn trace_execute_instruction_budget(
+        &mut self,
+        handler: OpcodeHandlerBudget,
+        pc: usize,
+        budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
+        let frame = self.vm.frame();
+        let (instruction, _) = frame.code_block.bytecode.next_instruction(pc);
+        let opcode = Opcode::decode(frame.code_block.bytecode.bytes[pc]);
+        let operands = frame.code_block().instruction_operands(&instruction);
+
+        match opcode {
+            Opcode::Call
+            | Opcode::CallSpread
+            | Opcode::CallEval
+            | Opcode::CallEvalSpread
+            | Opcode::New
+            | Opcode::NewSpread
+            | Opcode::Return
+            | Opcode::SuperCall
+            | Opcode::SuperCallSpread
+            | Opcode::SuperCallDerived => {
+                println!();
+            }
+            _ => {}
+        }
+
+        let instant = Instant::now();
+        let result = self.execute_instruction_budget(handler, pc, budget);
+        let duration = instant.elapsed();
+
+        let stack = self
+            .vm
+            .stack
+            .display_trace(self.vm.frame(), self.vm.frames.len() - 1);
+
+        println!(
+            "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {operands:<OPERAND_COLUMN_WIDTH$} {stack}",
+            format!("{}μs", duration.as_micros()),
+            opcode.as_str(),
             TIME_COLUMN_WIDTH = Self::TIME_COLUMN_WIDTH,
             OPCODE_COLUMN_WIDTH = Self::OPCODE_COLUMN_WIDTH,
             OPERAND_COLUMN_WIDTH = Self::OPERAND_COLUMN_WIDTH,
@@ -682,21 +721,20 @@ impl Context {
 }
 
 impl Context {
-    fn execute_instruction<F>(
+    #[inline(always)]
+    fn execute_instruction(
         &mut self,
-        f: F,
-        opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord, Opcode>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
-    {
-        f(self, opcode)
+        handler: OpcodeHandler,
+        pc: usize,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandler> {
+        handler.call(self, pc)
     }
 
-    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord, Opcode>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
-    {
+    fn execute_one(
+        &mut self,
+        handler: OpcodeHandler,
+        pc: usize,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandler> {
         #[cfg(feature = "fuzz")]
         {
             use crate::error::EngineError;
@@ -710,13 +748,45 @@ impl Context {
 
         #[cfg(feature = "trace")]
         if self.vm.trace || self.vm.frame().code_block.traceable() {
-            self.trace_execute_instruction(f, opcode)
-        } else {
-            self.execute_instruction(f, opcode)
+            return self.trace_execute_instruction(handler, pc);
         }
 
-        #[cfg(not(feature = "trace"))]
-        self.execute_instruction(f, opcode)
+        self.execute_instruction(handler, pc)
+    }
+
+    #[inline(always)]
+    fn execute_instruction_budget(
+        &mut self,
+        handler: OpcodeHandlerBudget,
+        pc: usize,
+        budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
+        handler.call(self, pc, budget)
+    }
+
+    fn execute_one_budget(
+        &mut self,
+        handler: OpcodeHandlerBudget,
+        pc: usize,
+        budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
+        #[cfg(feature = "fuzz")]
+        {
+            use crate::error::EngineError;
+            if self.instructions_remaining == 0 {
+                return ControlFlow::Break(CompletionRecord::Throw(
+                    EngineError::NoInstructionsRemain.into(),
+                ));
+            }
+            self.instructions_remaining -= 1;
+        }
+
+        #[cfg(feature = "trace")]
+        if self.vm.trace || self.vm.frame().code_block.traceable() {
+            return self.trace_execute_instruction_budget(handler, pc, budget);
+        }
+
+        self.execute_instruction_budget(handler, pc, budget)
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
@@ -864,33 +934,25 @@ impl Context {
             self.trace_call_frame();
         }
 
-        let mut runtime_budget: u32 = budget;
+        let mut runtime_budget = budget;
 
-        let mut opcode = match self
+        let mut handler = match self
             .vm
             .frame()
             .code_block
             .bytecode
             .bytes
             .get(self.vm.frame().pc as usize)
-            .map(|byte| Opcode::decode(*byte))
         {
-            Some(opcode) => opcode,
-            None => {
-                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
-            }
+            Some(byte) => OPCODE_HANDLERS_BUDGET[Opcode::decode(*byte) as usize],
+            None => return CompletionRecord::Throw(JsError::from_native(JsNativeError::error())),
         };
 
         loop {
-            match self.execute_one(
-                |context, opcode| {
-                    let pc = context.vm.frame().pc as usize;
-                    OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, &mut runtime_budget)
-                },
-                opcode,
-            ) {
-                ControlFlow::Continue(next_opcode) => {
-                    opcode = next_opcode;
+            let pc = self.vm.frame().pc as usize;
+            match self.execute_one_budget(handler, pc, &mut runtime_budget) {
+                ControlFlow::Continue(next) => {
+                    handler = next;
                     if runtime_budget == 0 {
                         runtime_budget = budget;
                         yield_now().await;
@@ -907,34 +969,56 @@ impl Context {
             self.trace_call_frame();
         }
 
-        let mut opcode = match self
+        let mut handler = match self
             .vm
             .frame()
             .code_block
             .bytecode
             .bytes
             .get(self.vm.frame().pc as usize)
-            .map(|byte| Opcode::decode(*byte))
         {
-            Some(opcode) => opcode,
-            None => {
-                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
-            }
+            Some(byte) => OPCODE_HANDLERS[Opcode::decode(*byte) as usize],
+            None => return CompletionRecord::Throw(JsError::from_native(JsNativeError::error())),
         };
 
         loop {
-            match self.execute_one(
-                |context, opcode| {
-                    let pc = context.vm.frame().pc as usize;
-                    OPCODE_HANDLERS[opcode as usize](context, pc)
-                },
-                opcode,
-            ) {
-                ControlFlow::Continue(next_opcode) => {
-                    opcode = next_opcode;
-                }
+            let pc = self.vm.frame().pc as usize;
+            match self.execute_one(handler, pc) {
+                ControlFlow::Continue(next) => handler = next,
                 ControlFlow::Break(value) => return value,
             }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_opcode_handler(&self) -> ControlFlow<CompletionRecord, OpcodeHandler> {
+        let frame = self.vm.frame();
+        let pc = frame.pc as usize;
+        match frame.code_block.bytecode.bytes.get(pc) {
+            Some(byte) => {
+                let opcode = Opcode::decode(*byte);
+                ControlFlow::Continue(OPCODE_HANDLERS[opcode as usize])
+            }
+            None => ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(
+                JsNativeError::error(),
+            ))),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn next_opcode_handler_budget(
+        &self,
+    ) -> ControlFlow<CompletionRecord, OpcodeHandlerBudget> {
+        let frame = self.vm.frame();
+        let pc = frame.pc as usize;
+        match frame.code_block.bytecode.bytes.get(pc) {
+            Some(byte) => {
+                let opcode = Opcode::decode(*byte);
+                ControlFlow::Continue(OPCODE_HANDLERS_BUDGET[opcode as usize])
+            }
+            None => ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(
+                JsNativeError::error(),
+            ))),
         }
     }
 
