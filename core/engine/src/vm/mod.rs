@@ -628,9 +628,9 @@ impl Context {
         &mut self,
         f: F,
         opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord>
+    ) -> ControlFlow<CompletionRecord, Opcode>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
     {
         let frame = self.vm.frame();
         let (instruction, _) = frame
@@ -682,16 +682,20 @@ impl Context {
 }
 
 impl Context {
-    fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
+    fn execute_instruction<F>(
+        &mut self,
+        f: F,
+        opcode: Opcode,
+    ) -> ControlFlow<CompletionRecord, Opcode>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
     {
         f(self, opcode)
     }
 
-    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
+    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord, Opcode>
     where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord, Opcode>,
     {
         #[cfg(feature = "fuzz")]
         {
@@ -862,36 +866,41 @@ impl Context {
 
         let mut runtime_budget: u32 = budget;
 
-        while let Some(byte) = self
+        let mut opcode = match self
             .vm
             .frame()
             .code_block
             .bytecode
             .bytes
             .get(self.vm.frame().pc as usize)
+            .map(|byte| Opcode::decode(*byte))
         {
-            let opcode = Opcode::decode(*byte);
+            Some(opcode) => opcode,
+            None => {
+                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
+            }
+        };
+
+        loop {
+            let frame = self.vm.frame();
+            let pc = frame.pc as usize;
 
             match self.execute_one(
                 |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
                     OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, &mut runtime_budget)
                 },
                 opcode,
             ) {
-                ControlFlow::Continue(()) => {}
+                ControlFlow::Continue(next_opcode) => {
+                    opcode = next_opcode;
+                    if runtime_budget == 0 {
+                        runtime_budget = budget;
+                        yield_now().await;
+                    }
+                }
                 ControlFlow::Break(value) => return value,
             }
-
-            if runtime_budget == 0 {
-                runtime_budget = budget;
-                yield_now().await;
-            }
         }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
@@ -900,31 +909,35 @@ impl Context {
             self.trace_call_frame();
         }
 
-        while let Some(byte) = self
+        let mut opcode = match self
             .vm
             .frame()
             .code_block
             .bytecode
             .bytes
             .get(self.vm.frame().pc as usize)
+            .map(|byte| Opcode::decode(*byte))
         {
-            let opcode = Opcode::decode(*byte);
+            Some(opcode) => opcode,
+            None => {
+                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
+            }
+        };
+
+        loop {
+            let frame = self.vm.frame();
+            let pc = frame.pc as usize;
 
             match self.execute_one(
-                |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
-                    OPCODE_HANDLERS[opcode as usize](context, pc)
-                },
+                |context, opcode| OPCODE_HANDLERS[opcode as usize](context, pc),
                 opcode,
             ) {
-                ControlFlow::Continue(()) => {}
+                ControlFlow::Continue(next_opcode) => {
+                    opcode = next_opcode;
+                }
                 ControlFlow::Break(value) => return value,
             }
         }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
     /// Checks if we haven't exceeded the defined runtime limits.

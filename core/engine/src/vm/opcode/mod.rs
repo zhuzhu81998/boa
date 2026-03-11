@@ -1,7 +1,7 @@
 #![allow(clippy::inline_always)]
 #![allow(clippy::doc_markdown)]
 use crate::{
-    Context,
+    Context, JsError, JsNativeError,
     vm::{completion_record::CompletionRecord, completion_record::IntoCompletionRecord},
 };
 use args::{Argument, read};
@@ -394,7 +394,7 @@ macro_rules! generate_opcodes {
             )*
         }
 
-        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
+        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord, Opcode>;
 
         pub(crate) const OPCODE_HANDLERS: [OpcodeHandler; 256] = {
             [
@@ -404,7 +404,7 @@ macro_rules! generate_opcodes {
             ]
         };
 
-        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
+        type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord, Opcode>;
 
         pub(crate) const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
             [
@@ -418,12 +418,28 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
+                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord, Opcode> {
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+
+                    let next_opcode = match bytes
+                        .get(next_pc)
+                        .map(|byte| Opcode::decode(*byte))
+                    {
+                        Some(opcode) => opcode,
+                        None => {
+                            return ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(JsNativeError::error())));
+                        }
+                    };
+
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
-                    IntoCompletionRecord::into_completion_record(result, context)
+
+                    let completion_record = IntoCompletionRecord::into_completion_record(result, context);
+                    match completion_record {
+                        ControlFlow::Continue(()) => ControlFlow::Continue(next_opcode),
+                        ControlFlow::Break(value) => ControlFlow::Break(value),
+                    }
                 }
             }
         )*
@@ -432,13 +448,29 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
+                fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord, Opcode> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+
+                    let next_opcode = match bytes
+                        .get(next_pc)
+                        .map(|byte| Opcode::decode(*byte))
+                    {
+                        Some(opcode) => opcode,
+                        None => {
+                            return ControlFlow::Break(CompletionRecord::Throw(JsError::from_native(JsNativeError::error())));
+                        }
+                    };
+
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
-                    IntoCompletionRecord::into_completion_record(result, context)
+
+                    let completion_record = IntoCompletionRecord::into_completion_record(result, context);
+                    match completion_record {
+                        ControlFlow::Continue(()) => ControlFlow::Continue(next_opcode),
+                        ControlFlow::Break(value) => ControlFlow::Break(value),
+                    }
                 }
             }
         )*
