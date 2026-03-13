@@ -51,6 +51,7 @@
     html_favicon_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo_black.svg"
 )]
 #![feature(explicit_tail_calls)]
+#![feature(rust_preserve_none_cc)]
 #![cfg_attr(test, allow(clippy::needless_raw_string_hashes))] // Makes strings a bit more copy-pastable
 #![cfg_attr(not(test), forbid(clippy::unwrap_used))]
 #![allow(

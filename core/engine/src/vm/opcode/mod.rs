@@ -417,7 +417,6 @@ macro_rules! generate_opcodes {
 
         $(
             paste::paste! {
-                #[inline(always)]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
@@ -430,7 +429,7 @@ macro_rules! generate_opcodes {
             }
         )*
 
-        type OpcodeHandlerTailCall = fn(&mut Context, usize) -> CompletionRecord;
+        type OpcodeHandlerTailCall = extern "rust-preserve-none" fn(&mut Context, usize) -> CompletionRecord;
 
         const OPCODE_HANDLERS_TAIL: [OpcodeHandlerTailCall; 256] = {
             [
@@ -442,9 +441,8 @@ macro_rules! generate_opcodes {
 
         $(
             paste::paste! {
-                #[inline(always)]
                 #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake _tail>](
+                extern "rust-preserve-none" fn [<handle_ $Variant:snake _tail>](
                     context: &mut Context,
                     pc: usize,
                 ) -> CompletionRecord {
@@ -453,8 +451,10 @@ macro_rules! generate_opcodes {
                     context.vm.frame_mut().pc = next_pc as u32;
                     let result = $Variant::operation(args, context);
 
+                    let cr = IntoCompletionRecord::into_completion_record(result, context);
+
                     // This match MUST be the last expression — both arms in tail position
-                    match IntoCompletionRecord::into_completion_record(result, context) {
+                    match cr {
                         ControlFlow::Continue(()) => become context.dispatch_next(context.vm.frame.pc as usize),
                         ControlFlow::Break(value) => value,
                     }
@@ -468,7 +468,6 @@ macro_rules! generate_opcodes {
                 impl $Variant {
                     #[allow(unused_parens)]
                     #[allow(unused_variables)]
-                    #[inline(always)]
                     fn operation(args: (), context: &mut Context) {
                         $mapping::operation(args, context)
                     }
@@ -528,39 +527,15 @@ impl Context {
         OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget)
     }
 
-    #[inline(always)]
-    pub(crate) fn dispatch_next(&mut self, pc: usize) -> CompletionRecord {
+    pub(crate) extern "rust-preserve-none" fn dispatch_next(&mut self, pc: usize) -> CompletionRecord {
         match self.vm.frame.code_block.bytecode.bytecode.get(pc) {
             Some(&byte) => {
                 let opcode = Opcode::decode(byte);
-                OPCODE_HANDLERS_TAIL[opcode as usize](self, pc)
+                become OPCODE_HANDLERS_TAIL[opcode as usize](self, pc)
             }
             None => CompletionRecord::Normal(JsValue::undefined()),
         }
     }
-
-    // #[inline(always)]
-    // unsafe fn dispatch_next_budget(&mut self) -> CompletionRecord {
-    //     // Fetch next bytecode
-    //     match self
-    //         .vm
-    //         .frame
-    //         .code_block
-    //         .bytecode
-    //         .bytecode
-    //         .get(self.vm.frame.pc as usize)
-    //     {
-    //         Some(&byte) => {
-    //             let opcode = Opcode::decode(byte);
-    //             // Tail-call into the next handler
-    //             OPCODE_HANDLERS_BUDGET[opcode as usize](self)
-    //         }
-    //         None => {
-    //             // End of bytecode — return normally
-    //             CompletionRecord::Normal(JsValue::undefined())
-    //         }
-    //     }
-    // }
 }
 
 /// Iterator over the instructions in the compact bytecode.

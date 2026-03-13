@@ -866,27 +866,6 @@ impl Context {
         {
             return self.dispatch_next(self.vm.frame.pc as usize);
         }
-
-        // #[cfg(debug_assertions)]
-        // {
-        //     // Keep original loop — TCO won't fire in debug, would stack overflow
-        //     while let Some(byte) = self
-        //         .vm
-        //         .frame
-        //         .code_block
-        //         .bytecode
-        //         .bytecode
-        //         .get(self.vm.frame.pc as usize)
-        //     {
-        //         let opcode = Opcode::decode(*byte);
-        //         match self.execute_one(Self::execute_bytecode_instruction, opcode) {
-        //             ControlFlow::Continue(()) => {}
-        //             ControlFlow::Break(value) => return value,
-        //         }
-        //     }
-        // }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
     /// Checks if we haven't exceeded the defined runtime limits.
