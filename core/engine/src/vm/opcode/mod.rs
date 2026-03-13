@@ -405,16 +405,6 @@ macro_rules! generate_opcodes {
             )*
         }
 
-        type OpcodeHandler = fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
-
-        const OPCODE_HANDLERS: [OpcodeHandler; 256] = {
-            [
-                $(
-                    paste::paste! { [<handle_ $Variant:snake>] },
-                )*
-            ]
-        };
-
         type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
 
         const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
@@ -424,20 +414,6 @@ macro_rules! generate_opcodes {
                 )*
             ]
         };
-
-        $(
-            paste::paste! {
-                #[inline(always)]
-                #[allow(unused_parens)]
-                fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
-                    let bytes = &context.vm.frame.code_block.bytecode.bytecode;
-                    let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
-                    context.vm.frame_mut().pc = next_pc as u32;
-                    let result = $Variant::operation(args, context);
-                    IntoCompletionRecord::into_completion_record(result, context)
-                }
-            }
-        )*
 
         $(
             paste::paste! {
@@ -454,7 +430,7 @@ macro_rules! generate_opcodes {
             }
         )*
 
-        type OpcodeHandlerTailCall = unsafe fn(&mut Context, usize) -> CompletionRecord;
+        type OpcodeHandlerTailCall = fn(&mut Context, usize) -> CompletionRecord;
 
         const OPCODE_HANDLERS_TAIL: [OpcodeHandlerTailCall; 256] = {
             [
@@ -468,7 +444,7 @@ macro_rules! generate_opcodes {
             paste::paste! {
                 #[inline(always)]
                 #[allow(unused_parens)]
-                unsafe fn [<handle_ $Variant:snake _tail>](
+                fn [<handle_ $Variant:snake _tail>](
                     context: &mut Context,
                     pc: usize,
                 ) -> CompletionRecord {
@@ -479,7 +455,7 @@ macro_rules! generate_opcodes {
 
                     // This match MUST be the last expression — both arms in tail position
                     match IntoCompletionRecord::into_completion_record(result, context) {
-                        ControlFlow::Continue(()) => context.dispatch_next(),
+                        ControlFlow::Continue(()) => become context.dispatch_next(context.vm.frame.pc as usize),
                         ControlFlow::Break(value) => value,
                     }
                 }
@@ -541,16 +517,6 @@ macro_rules! generate_opcodes {
 }
 
 impl Context {
-    pub(crate) fn execute_bytecode_instruction(
-        &mut self,
-        opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord> {
-        let frame = self.vm.frame_mut();
-        let pc = frame.pc as usize;
-
-        OPCODE_HANDLERS[opcode as usize](self, pc)
-    }
-
     pub(crate) fn execute_bytecode_instruction_with_budget(
         &mut self,
         budget: &mut u32,
@@ -563,8 +529,7 @@ impl Context {
     }
 
     #[inline(always)]
-    pub(crate) unsafe fn dispatch_next(&mut self) -> CompletionRecord {
-        let pc = self.vm.frame.pc as usize;
+    pub(crate) fn dispatch_next(&mut self, pc: usize) -> CompletionRecord {
         match self.vm.frame.code_block.bytecode.bytecode.get(pc) {
             Some(&byte) => {
                 let opcode = Opcode::decode(byte);

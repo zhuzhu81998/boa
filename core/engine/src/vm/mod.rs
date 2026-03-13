@@ -864,7 +864,7 @@ impl Context {
 
         // #[cfg(not(debug_assertions))]
         {
-            return unsafe { self.dispatch_next() };
+            return self.dispatch_next(self.vm.frame.pc as usize);
         }
 
         // #[cfg(debug_assertions)]
