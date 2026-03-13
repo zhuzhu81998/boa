@@ -7,7 +7,7 @@ use crate::{
     js_string,
     vm::{
         GeneratorResumeKind,
-        opcode::{Operation, RegisterOperand, VaryingOperand},
+        opcode::{IndexOperand, Operation, RegisterOperand},
     },
 };
 
@@ -111,7 +111,7 @@ impl IteratorUpdateResult {
             .iterators
             .pop()
             .js_expect("iterator stack should have at least an iterator")?;
-        let result_v = context.vm.get_register(result.into()).clone();
+        let result_v = context.vm.take_register(result.into());
         iterator.update_result(result_v, context)?;
         context
             .vm
@@ -400,7 +400,7 @@ impl Operation for IteratorToArray {
 /// `IteratorStackEmpty` implements the Opcode Operation for `Opcode::IteratorStackEmpty`
 ///
 /// Operation:
-/// - Pushes `true` to the stack if the iterator stack is empty.
+/// - Store `true` in dst if the iterator stack is empty.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct IteratorStackEmpty;
 
@@ -427,13 +427,10 @@ pub(crate) struct CreateIteratorResult;
 
 impl CreateIteratorResult {
     #[inline(always)]
-    pub(crate) fn operation(
-        (value, done): (RegisterOperand, VaryingOperand),
-        context: &mut Context,
-    ) {
+    pub(crate) fn operation((value, done): (RegisterOperand, IndexOperand), context: &mut Context) {
         let done = u32::from(done) != 0;
-        let val = context.vm.get_register(value.into());
-        let result = create_iter_result_object(val.clone(), done, context);
+        let val = context.vm.take_register(value.into());
+        let result = create_iter_result_object(val, done, context);
         context.vm.set_register(value.into(), result);
     }
 }

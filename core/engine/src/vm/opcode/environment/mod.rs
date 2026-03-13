@@ -1,4 +1,4 @@
-use super::{RegisterOperand, VaryingOperand};
+use super::{IndexOperand, RegisterOperand};
 use crate::{
     Context, JsExpect, JsResult, JsValue,
     error::JsNativeError,
@@ -22,13 +22,14 @@ impl GetFunctionObject {
         function_object: RegisterOperand,
         context: &mut Context,
     ) -> JsResult<()> {
-        let env = context
-            .vm
-            .frame
-            .environments
-            .get_this_environment()
-            .as_function()
-            .js_expect("must be in a function environment")?;
+        let env = {
+            let frame = context.vm.frame();
+            frame
+                .environments
+                .get_this_environment(frame.realm.environment())
+                .as_function()
+                .js_expect("must be in a function environment")?
+        };
 
         let function_object_v = env.slots().function_object().clone().into();
 
@@ -64,12 +65,15 @@ impl This {
 
         let this = context
             .vm
-            .frame
+            .frame()
             .environments
             .get_this_binding()?
             .unwrap_or(context.realm().global_this().clone().into());
         context.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
-        context.vm.stack.set_this(&context.vm.frame, this.clone());
+        context.vm.stack.set_this(
+            context.vm.frames.last().expect("frame must exist"),
+            this.clone(),
+        );
         context.vm.set_register(dst.into(), this);
         Ok(())
     }
@@ -91,7 +95,7 @@ pub(crate) struct ThisForObjectEnvironmentName;
 impl ThisForObjectEnvironmentName {
     #[inline(always)]
     pub(super) fn operation(
-        (dst, index): (RegisterOperand, VaryingOperand),
+        (dst, index): (RegisterOperand, IndexOperand),
         context: &mut Context,
     ) -> JsResult<()> {
         let binding_locator = context.vm.frame().code_block.bindings[usize::from(index)].clone();
@@ -118,7 +122,7 @@ pub(crate) struct SuperCall;
 
 impl SuperCall {
     #[inline(always)]
-    pub(super) fn operation(argument_count: VaryingOperand, context: &mut Context) -> JsResult<()> {
+    pub(super) fn operation(argument_count: IndexOperand, context: &mut Context) -> JsResult<()> {
         let super_constructor = context
             .vm
             .stack
@@ -131,13 +135,14 @@ impl SuperCall {
                 .into());
         };
 
-        let this_env = context
-            .vm
-            .frame
-            .environments
-            .get_this_environment()
-            .as_function()
-            .expect("super call must be in function environment");
+        let this_env = {
+            let frame = context.vm.frame();
+            frame
+                .environments
+                .get_this_environment(frame.realm.environment())
+                .as_function()
+                .expect("super call must be in function environment")
+        };
 
         let new_target = this_env
             .slots()
@@ -196,13 +201,14 @@ impl SuperCallSpread {
             .stack
             .calling_convention_push_arguments(&arguments);
 
-        let this_env = context
-            .vm
-            .frame
-            .environments
-            .get_this_environment()
-            .as_function()
-            .expect("super call must be in function environment");
+        let this_env = {
+            let frame = context.vm.frame();
+            frame
+                .environments
+                .get_this_environment(frame.realm.environment())
+                .as_function()
+                .expect("super call must be in function environment")
+        };
 
         let new_target = this_env
             .slots()
@@ -235,13 +241,14 @@ pub(crate) struct SuperCallDerived;
 impl SuperCallDerived {
     #[inline(always)]
     pub(super) fn operation((): (), context: &mut Context) -> JsResult<()> {
-        let this_env = context
-            .vm
-            .frame
-            .environments
-            .get_this_environment()
-            .as_function()
-            .expect("super call must be in function environment");
+        let this_env = {
+            let frame = context.vm.frame();
+            frame
+                .environments
+                .get_this_environment(frame.realm.environment())
+                .as_function()
+                .expect("super call must be in function environment")
+        };
         let new_target = this_env
             .slots()
             .new_target()
@@ -301,13 +308,14 @@ impl BindThisValue {
             .clone();
 
         // 7. Let thisER be GetThisEnvironment().
-        let this_env = context
-            .vm
-            .frame
-            .environments
-            .get_this_environment()
-            .as_function()
-            .expect("super call must be in function environment");
+        let this_env = {
+            let frame = context.vm.frame();
+            frame
+                .environments
+                .get_this_environment(frame.realm.environment())
+                .as_function()
+                .expect("super call must be in function environment")
+        };
 
         // 8. Perform ? thisER.BindThisValue(result).
         this_env.bind_this_value(result.clone())?;

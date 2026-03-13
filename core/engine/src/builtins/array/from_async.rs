@@ -1,13 +1,14 @@
 use boa_gc::{Finalize, Trace};
 
 use super::Array;
-use crate::builtins::AsyncFromSyncIterator;
 use crate::builtins::iterable::IteratorRecord;
 use crate::builtins::promise::ResolvingFunctions;
+use crate::builtins::{AsyncFromSyncIterator, Number};
 use crate::native_function::{CoroutineState, NativeCoroutine};
 use crate::object::{JsFunction, JsPromise};
 use crate::{
-    Context, JsArgs, JsError, JsNativeError, JsObject, JsResult, JsSymbol, JsValue, js_string,
+    Context, JsArgs, JsError, JsExpect, JsNativeError, JsObject, JsResult, JsSymbol, JsValue,
+    js_string,
 };
 use std::cell::Cell;
 
@@ -185,7 +186,7 @@ impl Array {
             resolvers
                 .reject
                 .call(&JsValue::undefined(), &[err.into_opaque(context)?], context)
-                .expect("resolving functions cannot fail");
+                .js_expect("resolving functions cannot fail")?;
         }
 
         // 5. Return promiseCapability.[[Promise]].
@@ -205,17 +206,17 @@ struct GlobalState {
 enum AsyncIteratorStateMachine {
     LoopStart {
         a: JsObject,
-        k: u64,
+        k: usize,
         iterator_record: IteratorRecord,
     },
     LoopContinue {
         a: JsObject,
-        k: u64,
+        k: usize,
         iterator_record: IteratorRecord,
     },
     LoopEnd {
         a: JsObject,
-        k: u64,
+        k: usize,
         iterator_record: IteratorRecord,
         mapped_value: Option<JsResult<JsValue>>,
     },
@@ -248,7 +249,7 @@ fn from_async_iterator(
                     iterator_record,
                 } => {
                     // Inverted conditional makes for a simpler code.
-                    if k < 2u64.pow(53) - 1 {
+                    if (k as u64) < Number::MAX_SAFE_INTEGER as u64 {
                         // 2. Let Pk be ! ToString(𝔽(k)).
                         // 3. Let nextResult be ? Call(iteratorRecord.[[NextMethod]], iteratorRecord.[[Iterator]]).
                         let next_result = iterator_record.next_method().call(
@@ -313,7 +314,7 @@ fn from_async_iterator(
                             .resolvers
                             .resolve
                             .call(&JsValue::undefined(), &[a.into()], context)
-                            .expect("resolving functions cannot fail");
+                            .js_expect("resolving functions cannot fail")?;
 
                         return Ok(CoroutineState::Done);
                     }
@@ -454,7 +455,7 @@ fn from_async_iterator(
                 .resolvers
                 .reject
                 .call(&JsValue::undefined(), &[err.into_opaque(context)?], context)
-                .expect("resolving functions cannot fail");
+                .js_expect("resolving functions cannot fail")?;
             Ok(CoroutineState::Done)
         }
     }
@@ -467,20 +468,20 @@ enum ArrayLikeStateMachine {
     LoopStart {
         array_like: JsObject,
         a: JsObject,
-        len: u64,
-        k: u64,
+        len: usize,
+        k: usize,
     },
     LoopContinue {
         array_like: JsObject,
         a: JsObject,
-        len: u64,
-        k: u64,
+        len: usize,
+        k: usize,
     },
     LoopEnd {
         array_like: JsObject,
         a: JsObject,
-        len: u64,
-        k: u64,
+        len: usize,
+        k: usize,
         mapped_value: Option<JsValue>,
     },
 }
@@ -523,7 +524,7 @@ fn from_array_like(
                             .resolvers
                             .resolve
                             .call(&JsValue::undefined(), &[a.into()], context)
-                            .expect("resolving functions cannot fail");
+                            .js_expect("resolving functions cannot fail")?;
 
                         return Ok(CoroutineState::Done);
                     }
@@ -615,7 +616,7 @@ fn from_array_like(
                 .resolvers
                 .reject
                 .call(&JsValue::undefined(), &[err.into_opaque(context)?], context)
-                .expect("resolving functions cannot fail");
+                .js_expect("resolving functions cannot fail")?;
             Ok(CoroutineState::Done)
         }
     }
