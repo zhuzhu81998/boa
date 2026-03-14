@@ -600,6 +600,107 @@ impl Vm {
     }
 }
 
+#[cfg(feature = "trace")]
+macro_rules! trace_exec {
+    ($ctx:expr, $opcode:expr, $pc:expr, $exec:expr) => {{
+        if $ctx.vm.current_frame != Some($ctx.vm.frame()) {
+            println!();
+            $ctx.trace_call_frame();
+            $ctx.vm.current_frame = Some($ctx.vm.frame());
+        }
+
+        let frame = $ctx.vm.frame();
+        let (instruction, _) = frame
+            .code_block
+            .bytecode
+            .next_instruction(frame.pc as usize);
+
+        let operands = frame
+            .code_block()
+            .instruction_operands(&instruction);
+
+        let instant = Instant::now();
+
+        let result = $exec;
+
+        let duration = instant.elapsed();
+
+        let stack = $ctx
+            .vm
+            .stack
+            .display_trace($ctx.vm.frame(), $ctx.vm.frames.len() - 1);
+
+        println!(
+            "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {operands:<OPERAND_COLUMN_WIDTH$} {stack}",
+            format!("{}μs", duration.as_micros()),
+            format!("{}", $opcode.as_str()),
+            TIME_COLUMN_WIDTH = Self::TIME_COLUMN_WIDTH,
+            OPCODE_COLUMN_WIDTH = Self::OPCODE_COLUMN_WIDTH,
+            OPERAND_COLUMN_WIDTH = Self::OPERAND_COLUMN_WIDTH,
+        );
+
+        result
+    }};
+}
+
+macro_rules! vm_run_loop {
+    ($self:ident, $exec:ident) => {{
+        while let Some(byte) = $self
+            .vm
+            .frame()
+            .code_block
+            .bytecode
+            .bytes
+            .get($self.vm.frame().pc as usize)
+        {
+            let opcode = Opcode::decode(*byte);
+
+            match $self.$exec(opcode) {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(value) => return value,
+            }
+        }
+    }};
+}
+
+macro_rules! vm_run_loop_budget {
+    ($self:ident, $exec:ident, $runtime_budget:ident, $budget:ident) => {{
+        while let Some(byte) = {
+            let frame = $self.vm.frame();
+            frame.code_block.bytecode.bytes.get(frame.pc as usize)
+        } {
+            let opcode = Opcode::decode(*byte);
+
+            match $self.$exec(opcode, &mut $runtime_budget) {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(value) => return value,
+            }
+
+            if $runtime_budget == 0 {
+                $runtime_budget = $budget;
+                yield_now().await;
+            }
+        }
+    }};
+}
+
+macro_rules! fuzz_check {
+    ($ctx:expr) => {
+        #[cfg(feature = "fuzz")]
+        {
+            use crate::error::EngineError;
+
+            if $ctx.instructions_remaining == 0 {
+                return ControlFlow::Break(CompletionRecord::Throw(
+                    EngineError::NoInstructionsRemain.into(),
+                ));
+            }
+
+            $ctx.instructions_remaining -= 1;
+        }
+    };
+}
+
 #[allow(clippy::print_stdout)]
 #[cfg(feature = "trace")]
 impl Context {
@@ -645,84 +746,156 @@ impl Context {
         );
     }
 
-    fn trace_execute_instruction<F>(
+    #[inline(always)]
+    fn trace_execute_instruction(
         &mut self,
-        f: F,
         opcode: Opcode,
-    ) -> ControlFlow<CompletionRecord>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
-    {
-        if self.vm.current_frame != Some(self.vm.frame()) {
-            println!();
-            self.trace_call_frame();
-            self.vm.current_frame = Some(self.vm.frame());
-        }
+        pc: usize,
+    ) -> ControlFlow<CompletionRecord> {
+        trace_exec!(self, opcode, pc, OPCODE_HANDLERS[opcode as usize](self, pc))
+    }
+
+    #[inline(always)]
+    fn trace_execute_instruction_budget(
+        &mut self,
+        opcode: Opcode,
+        pc: usize,
+        runtime_budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord> {
+        trace_exec!(
+            self,
+            opcode,
+            pc,
+            OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, runtime_budget)
+        )
+    }
+
+    #[inline(always)]
+    fn execute_one_trace(&mut self, opcode: Opcode) -> ControlFlow<CompletionRecord> {
+        fuzz_check!(self);
+
         let frame = self.vm.frame();
-        let (instruction, _) = frame
-            .code_block
-            .bytecode
-            .next_instruction(frame.pc as usize);
-        let operands = self
-            .vm
-            .frame()
-            .code_block()
-            .instruction_operands(&instruction);
+        let pc = frame.pc as usize;
 
-        let instant = Instant::now();
-        let result = self.execute_instruction(f, opcode);
-        let duration = instant.elapsed();
+        self.trace_execute_instruction(opcode, pc)
+    }
 
-        let stack = self
-            .vm
-            .stack
-            .display_trace(self.vm.frame(), self.vm.frames.len() - 1);
+    #[inline(always)]
+    fn execute_one_trace_budget(
+        &mut self,
+        opcode: Opcode,
+        runtime_budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord> {
+        fuzz_check!(self);
 
-        println!(
-            "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {operands:<OPERAND_COLUMN_WIDTH$} {stack}",
-            format!("{}μs", duration.as_micros()),
-            format!("{}", opcode.as_str()),
-            TIME_COLUMN_WIDTH = Self::TIME_COLUMN_WIDTH,
-            OPCODE_COLUMN_WIDTH = Self::OPCODE_COLUMN_WIDTH,
-            OPERAND_COLUMN_WIDTH = Self::OPERAND_COLUMN_WIDTH,
-        );
+        let frame = self.vm.frame();
+        let pc = frame.pc as usize;
 
-        result
+        self.trace_execute_instruction_budget(opcode, pc, runtime_budget)
+    }
+
+    #[inline(never)]
+    fn run_trace(&mut self) -> CompletionRecord {
+        vm_run_loop!(self, execute_one_trace);
+        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 }
 
 impl Context {
-    fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
-    {
-        f(self, opcode)
+    #[inline(always)]
+    fn execute_one(&mut self, opcode: Opcode) -> ControlFlow<CompletionRecord> {
+        fuzz_check!(self);
+
+        let frame = self.vm.frame();
+        let pc = frame.pc as usize;
+
+        OPCODE_HANDLERS[opcode as usize](self, pc)
     }
 
-    fn execute_one<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
-    where
-        F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
-    {
-        #[cfg(feature = "fuzz")]
-        {
-            use crate::error::EngineError;
-            if self.instructions_remaining == 0 {
-                return ControlFlow::Break(CompletionRecord::Throw(
-                    EngineError::NoInstructionsRemain.into(),
-                ));
-            }
-            self.instructions_remaining -= 1;
-        }
+    #[inline(always)]
+    fn execute_one_budget(
+        &mut self,
+        opcode: Opcode,
+        runtime_budget: &mut u32,
+    ) -> ControlFlow<CompletionRecord> {
+        fuzz_check!(self);
 
+        let frame = self.vm.frame();
+        let pc = frame.pc as usize;
+
+        OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, runtime_budget)
+    }
+
+    #[inline(never)]
+    fn run_normal(&mut self) -> CompletionRecord {
+        vm_run_loop!(self, execute_one);
+
+        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+    }
+
+    pub(crate) fn run(&mut self) -> CompletionRecord {
         #[cfg(feature = "trace")]
-        if self.vm.trace || self.vm.frame().code_block.traceable() {
-            self.trace_execute_instruction(f, opcode)
-        } else {
-            self.execute_instruction(f, opcode)
+        {
+            if self.vm.trace || self.vm.frame().code_block.traceable() {
+                return self.run_trace();
+            }
         }
 
-        #[cfg(not(feature = "trace"))]
-        self.execute_instruction(f, opcode)
+        self.run_normal()
+    }
+
+    #[allow(clippy::future_not_send)]
+    #[inline(never)]
+    async fn run_async_with_budget_normal(&mut self, budget: u32) -> CompletionRecord {
+        let mut runtime_budget = budget;
+
+        vm_run_loop_budget!(self, execute_one_budget, runtime_budget, budget);
+        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+    }
+
+    #[cfg(feature = "trace")]
+    #[allow(clippy::future_not_send)]
+    #[inline(never)]
+    async fn run_async_with_budget_trace(&mut self, budget: u32) -> CompletionRecord {
+        let mut runtime_budget = budget;
+
+        vm_run_loop_budget!(self, execute_one_trace_budget, runtime_budget, budget);
+        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
+    }
+
+    /// Runs the current frame to completion, yielding to the caller each time `budget`
+    /// "clock cycles" have passed.
+    pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
+        #[cfg(feature = "trace")]
+        {
+            if self.vm.trace || self.vm.frame().code_block.traceable() {
+                return self.run_async_with_budget_trace(budget).await;
+            }
+        }
+
+        self.run_async_with_budget_normal(budget).await
+    }
+}
+
+// helper functions
+impl Context {
+    /// Checks if we haven't exceeded the defined runtime limits.
+    pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
+        // Must throw if the number of recursive calls exceeds the defined limit.
+        //
+        // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
+        // `Context::run()` recursively (for example, accessor calls).
+        // Subtract 1 to exclude the dummy frame at index 0.
+        let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
+        if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
+            return Err(RuntimeLimitError::Recursion.into());
+        }
+        // Must throw if the stack size exceeds the defined maximum length.
+        if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
+            return Err(RuntimeLimitError::StackSize.into());
+        }
+
+        Ok(())
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
@@ -859,91 +1032,6 @@ impl Context {
         self.vm.frame_mut().environments.truncate(env_fp as usize);
         self.vm.stack.truncate_to_frame(&frame);
         ControlFlow::Continue(())
-    }
-
-    /// Runs the current frame to completion, yielding to the caller each time `budget`
-    /// "clock cycles" have passed.
-    #[allow(clippy::future_not_send)]
-    pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
-        let mut runtime_budget: u32 = budget;
-
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
-            let opcode = Opcode::decode(*byte);
-
-            match self.execute_one(
-                |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
-                    OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, &mut runtime_budget)
-                },
-                opcode,
-            ) {
-                ControlFlow::Continue(()) => {}
-                ControlFlow::Break(value) => return value,
-            }
-
-            if runtime_budget == 0 {
-                runtime_budget = budget;
-                yield_now().await;
-            }
-        }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
-    }
-
-    pub(crate) fn run(&mut self) -> CompletionRecord {
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
-            let opcode = Opcode::decode(*byte);
-
-            match self.execute_one(
-                |context, opcode| {
-                    let frame = context.vm.frame();
-                    let pc = frame.pc as usize;
-
-                    OPCODE_HANDLERS[opcode as usize](context, pc)
-                },
-                opcode,
-            ) {
-                ControlFlow::Continue(()) => {}
-                ControlFlow::Break(value) => return value,
-            }
-        }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
-    }
-
-    /// Checks if we haven't exceeded the defined runtime limits.
-    pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
-        // Must throw if the number of recursive calls exceeds the defined limit.
-        //
-        // `host_call_depth` accounts for nested host calls that re-enter the VM by invoking
-        // `Context::run()` recursively (for example, accessor calls).
-        // Subtract 1 to exclude the dummy frame at index 0.
-        let recursion_depth = (self.vm.frames.len() - 1).saturating_add(self.vm.host_call_depth);
-        if self.vm.runtime_limits.recursion_limit() <= recursion_depth {
-            return Err(RuntimeLimitError::Recursion.into());
-        }
-        // Must throw if the stack size exceeds the defined maximum length.
-        if self.vm.runtime_limits.stack_size_limit() <= self.vm.stack.stack.len() {
-            return Err(RuntimeLimitError::StackSize.into());
-        }
-
-        Ok(())
     }
 }
 
