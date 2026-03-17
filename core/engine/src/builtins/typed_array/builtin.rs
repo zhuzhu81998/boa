@@ -10,7 +10,7 @@ use super::{
     ContentType, TypedArray, TypedArrayKind, TypedArrayMarker, object::typed_array_set_element,
 };
 use crate::{
-    Context, JsArgs, JsNativeError, JsObject, JsResult, JsString, JsSymbol, JsValue,
+    Context, JsArgs, JsExpect, JsNativeError, JsObject, JsResult, JsString, JsSymbol, JsValue,
     builtins::{
         Array, BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
         array::{ArrayIterator, Direction, find_via_predicate},
@@ -264,7 +264,7 @@ impl BuiltinTypedArray {
         // 8. Let arrayLike be ! ToObject(source).
         let array_like = source
             .to_object(context)
-            .expect("ToObject cannot fail here");
+            .js_expect("ToObject cannot fail here")?;
 
         // 9. Let len be ? LengthOfArrayLike(arrayLike).
         let len = array_like.length_of_array_like(context)?;
@@ -302,7 +302,7 @@ impl BuiltinTypedArray {
     /// [spec]: https://tc39.es/ecma262/#sec-typedarray-create-same-type
     fn from_kind_and_length(
         kind: TypedArrayKind,
-        length: u64,
+        length: usize,
         context: &mut Context,
     ) -> JsResult<JsObject> {
         let constructor =
@@ -395,7 +395,9 @@ impl BuiltinTypedArray {
         }
 
         // 8. Return ! Get(O, ! ToString(𝔽(k))).
-        Ok(o.upcast().get(k, context).expect("Get cannot fail here"))
+        Ok(o.upcast()
+            .get(k, context)
+            .js_expect("Get cannot fail here")?)
     }
 
     /// `get %TypedArray%.prototype.buffer`
@@ -559,16 +561,16 @@ impl BuiltinTypedArray {
             let byte_offset = ta.byte_offset();
 
             // h. Let bufferByteLimit be (len × elementSize) + byteOffset.
-            let buffer_byte_limit = ((len * element_size) + byte_offset) as usize;
+            let buffer_byte_limit = len * element_size + byte_offset;
 
             // i. Let toByteIndex be (targetIndex × elementSize) + byteOffset.
-            let to_byte_index = (to * element_size + byte_offset) as usize;
+            let to_byte_index = to * element_size + byte_offset;
 
             // j. Let fromByteIndex be (startIndex × elementSize) + byteOffset.
-            let from_byte_index = (from * element_size + byte_offset) as usize;
+            let from_byte_index = from * element_size + byte_offset;
 
             // k. Let countBytes be count × elementSize.
-            let mut count_bytes = (count * element_size) as usize;
+            let mut count_bytes = count * element_size;
 
             // Readjust considering the buffer_byte_limit. A resize could
             // have readjusted the buffer size, which could put `count_bytes`
@@ -608,7 +610,7 @@ impl BuiltinTypedArray {
             }
 
             // SAFETY: All previous checks are made to ensure this memmove is always in-bounds,
-            // making this operation safe.
+            // making this operation safe. (e.g. if from_byte_index was larger than usize, the entire buffer would have been cloned)
             unsafe {
                 memmove(buf.as_ptr(), from_byte_index, to_byte_index, count_bytes);
             }
@@ -624,7 +626,11 @@ impl BuiltinTypedArray {
     ///  - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-%typedarray%.prototype.entries
-    fn entries(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn entries(
+        this: &JsValue,
+        _: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
         // 1. Let O be the this value.
         // 2. Perform ? ValidateTypedArray(O, seq-cst).
         let (ta, _) = TypedArray::validate(this, Ordering::SeqCst)?;
@@ -765,7 +771,7 @@ impl BuiltinTypedArray {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Perform ! Set(O, Pk, value, true).
             ta.set(k, value.clone(), true, context)
-                .expect("Set cannot fail here");
+                .js_expect("Set cannot fail here")?;
 
             // c. Set k to k + 1.
         }
@@ -816,7 +822,7 @@ impl BuiltinTypedArray {
         for k in 0..len {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Let selected be ! ToBoolean(? Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)).#
             let selected = callback_fn
@@ -845,7 +851,7 @@ impl BuiltinTypedArray {
         for (n, e) in kept.iter().enumerate() {
             // a. Perform ! Set(A, ! ToString(𝔽(n)), e, true).
             a.set(n, e.clone(), true, context)
-                .expect("Set cannot fail here");
+                .js_expect("Set cannot fail here")?;
             // b. Set n to n + 1.
         }
 
@@ -1032,7 +1038,7 @@ impl BuiltinTypedArray {
         for k in 0..len {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Perform ? Call(callbackfn, thisArg, « kValue, 𝔽(k), O »).
             callback_fn.call(
@@ -1084,19 +1090,22 @@ impl BuiltinTypedArray {
         // 9. If n ≥ 0, then
         let k = if n >= 0 {
             // a. Let k be n.
-            n as u64
+            usize::try_from(n).unwrap_or(len)
         } else {
             // 10. Else,
             // a. Let k be len + n.
             // b. If k < 0, set k to 0.
-            len.saturating_add_signed(n)
+            match isize::try_from(n) {
+                Ok(n) => len.saturating_add_signed(n),
+                Err(_) => 0, // extremely negative
+            }
         };
 
         // 11. Repeat, while k < len,
         let ta = ta.upcast();
         for k in k..len {
             // a. Let elementK be ! Get(O, ! ToString(𝔽(k))).
-            let element_k = ta.get(k, context).expect("Get cannot fail here");
+            let element_k = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // b. If SameValueZero(searchElement, elementK) is true, return true.
             if JsValue::same_value_zero(args.get_or_undefined(0), &element_k) {
@@ -1148,12 +1157,15 @@ impl BuiltinTypedArray {
         // 9. If n ≥ 0, then
         let k = if n >= 0 {
             // a. Let k be n.
-            n as u64
-        // 10. Else,
+            usize::try_from(n).unwrap_or(len)
         } else {
+            // 10. Else,
             // a. Let k be len + n.
             // b. If k < 0, set k to 0.
-            len.saturating_add_signed(n)
+            match isize::try_from(n) {
+                Ok(n) => len.saturating_add_signed(n),
+                Err(_) => 0, // extremely negative
+            }
         };
 
         // 11. Repeat, while k < len,
@@ -1164,7 +1176,7 @@ impl BuiltinTypedArray {
             // b.i. Let elementK be ! Get(O, ! ToString(𝔽(k))).
             //   ii. Let same be IsStrictlyEqual(searchElement, elementK).
             //   iii. If same is true, return 𝔽(k).
-            if let Some(element_k) = ta.try_get(k, context).expect("Get cannot fail here")
+            if let Some(element_k) = ta.try_get(k, context).js_expect("Get cannot fail here")?
                 && args.get_or_undefined(0).strict_equals(&element_k)
             {
                 return Ok(k.into());
@@ -1217,7 +1229,7 @@ impl BuiltinTypedArray {
             }
 
             // b. Let element be ! Get(O, ! ToString(𝔽(k))).
-            let element = ta.get(k, context).expect("Get cannot fail here");
+            let element = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. If element is undefined, let next be the empty String; otherwise, let next be ! ToString(element).
             // d. Set R to the string-concatenation of R and next.
@@ -1273,20 +1285,25 @@ impl BuiltinTypedArray {
         }
 
         // 5. If fromIndex is present, let n be ? ToIntegerOrInfinity(fromIndex); else let n be len - 1.
-        let k = match args.get(1) {
+        let k: usize = match args.get(1) {
             None => len,
             Some(n) => {
                 let n = n.to_integer_or_infinity(context)?;
+
+                // TODO: Safe cast
                 match n {
                     // 6. If n is -∞, return -1𝔽.
-                    IntegerOrInfinity::NegativeInfinity => return Ok((-1).into()),
+                    IntegerOrInfinity::NegativeInfinity => {
+                        return Ok((-1).into());
+                    }
                     // 7. If n ≥ 0, then
                     // a. Let k be min(n, len - 1).
-                    IntegerOrInfinity::Integer(i) if i >= 0 => min(i as u64 + 1, len),
+                    IntegerOrInfinity::Integer(i) if i >= 0 => min(i as usize + 1, len),
                     IntegerOrInfinity::PositiveInfinity => len,
+
                     // 8. Else,
                     // a. Let k be len + n.
-                    IntegerOrInfinity::Integer(i) => len.saturating_add_signed(i + 1),
+                    IntegerOrInfinity::Integer(i) => len.saturating_add_signed(i as isize + 1),
                 }
             }
         };
@@ -1299,7 +1316,7 @@ impl BuiltinTypedArray {
             // b.i. Let elementK be ! Get(O, ! ToString(𝔽(k))).
             //   ii. Let same be IsStrictlyEqual(searchElement, elementK).
             //   iii. If same is true, return 𝔽(k).
-            if let Some(element_k) = ta.try_get(k, context).expect("Get cannot fail here")
+            if let Some(element_k) = ta.try_get(k, context).js_expect("Get cannot fail here")?
                 && args.get_or_undefined(0).strict_equals(&element_k)
             {
                 return Ok(k.into());
@@ -1387,7 +1404,7 @@ impl BuiltinTypedArray {
         for k in 0..len {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Let mappedValue be ? Call(callbackfn, thisArg, « kValue, 𝔽(k), O »).
             let mapped_value = callback_fn.call(
@@ -1456,14 +1473,14 @@ impl BuiltinTypedArray {
             // b. Set accumulator to ! Get(O, Pk).
             // c. Set k to k + 1.
             k += 1;
-            ta.get(0, context).expect("Get cannot fail here")
+            ta.get(0, context).js_expect("Get cannot fail here")?
         };
 
         // 10. Repeat, while k < len,
         for k in k..len {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
             accumulator = callback_fn.call(
@@ -1526,7 +1543,7 @@ impl BuiltinTypedArray {
         } else {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Set accumulator to ! Get(O, Pk).
-            let accumulator = ta.get(len - 1, context).expect("Get cannot fail here");
+            let accumulator = ta.get(len - 1, context).js_expect("Get cannot fail here")?;
 
             // c. Set k to k - 1.
             (accumulator, len - 1)
@@ -1536,7 +1553,7 @@ impl BuiltinTypedArray {
         for k in (0..k).rev() {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
             accumulator = callback_fn.call(
@@ -1586,16 +1603,16 @@ impl BuiltinTypedArray {
             // b. Let upperP be ! ToString(𝔽(upper)).
             // c. Let lowerP be ! ToString(𝔽(lower)).
             // d. Let lowerValue be ! Get(O, lowerP).
-            let lower_value = ta.get(lower, context).expect("Get cannot fail here");
+            let lower_value = ta.get(lower, context).js_expect("Get cannot fail here")?;
             // e. Let upperValue be ! Get(O, upperP).
-            let upper_value = ta.get(upper, context).expect("Get cannot fail here");
+            let upper_value = ta.get(upper, context).js_expect("Get cannot fail here")?;
 
             // f. Perform ! Set(O, lowerP, upperValue, true).
             ta.set(lower, upper_value, true, context)
-                .expect("Set cannot fail here");
+                .js_expect("Set cannot fail here")?;
             // g. Perform ! Set(O, upperP, lowerValue, true).
             ta.set(upper, lower_value, true, context)
-                .expect("Set cannot fail here");
+                .js_expect("Set cannot fail here")?;
 
             // h. Set lower to lower + 1.
             lower += 1;
@@ -1633,11 +1650,11 @@ impl BuiltinTypedArray {
             // c. Let fromValue be ! Get(O, from).
             let value = ta
                 .get(len - k - 1, context)
-                .expect("cannot fail per the spec");
+                .js_expect("cannot fail per the spec")?;
             // d. Perform ! Set(A, Pk, fromValue, true).
             new_array
                 .set(k, value, true, context)
-                .expect("cannot fail per the spec");
+                .js_expect("cannot fail per the spec")?;
             // e. Set k to k + 1.
         }
 
@@ -1682,8 +1699,8 @@ impl BuiltinTypedArray {
                     .with_message("TypedArray.set called with negative offset")
                     .into());
             }
-            IntegerOrInfinity::PositiveInfinity => U64OrPositiveInfinity::PositiveInfinity,
-            IntegerOrInfinity::Integer(i) => U64OrPositiveInfinity::U64(i as u64),
+            IntegerOrInfinity::PositiveInfinity => UsizeOrPositiveInfinity::PositiveInfinity,
+            IntegerOrInfinity::Integer(i) => UsizeOrPositiveInfinity::Usize(i as usize),
         };
 
         // 6. If source is an Object that has a [[TypedArrayName]] internal slot, then
@@ -1713,7 +1730,7 @@ impl BuiltinTypedArray {
     /// [spec]: https://tc39.es/ecma262/#sec-settypedarrayfromtypedarray
     fn set_typed_array_from_typed_array(
         target: &JsObject<TypedArray>,
-        target_offset: &U64OrPositiveInfinity,
+        target_offset: &UsizeOrPositiveInfinity,
         source: &JsObject<TypedArray>,
         context: &mut Context,
     ) -> JsResult<()> {
@@ -1780,7 +1797,7 @@ impl BuiltinTypedArray {
         drop(src_array);
 
         // 15. If targetOffset = +∞, throw a RangeError exception.
-        let U64OrPositiveInfinity::U64(target_offset) = target_offset else {
+        let UsizeOrPositiveInfinity::Usize(target_offset) = target_offset else {
             return Err(JsNativeError::range()
                 .with_message("Target offset cannot be Infinity")
                 .into());
@@ -1808,14 +1825,12 @@ impl BuiltinTypedArray {
         // 19. If SameValue(srcBuffer, targetBuffer) is true or sameSharedArrayBuffer is true, then
         let src_byte_index = if BufferObject::equals(&src_buf_obj, &target_buf_obj) {
             // a. Let srcByteLength be source.[[ByteLength]].
-            let src_byte_offset = src_byte_offset as usize;
-            let src_byte_length = src_byte_length as usize;
 
             let s = {
                 let slice = src_buf_obj.as_buffer();
                 let slice = slice
                     .bytes_with_len(src_buf_len)
-                    .expect("Already checked for detached buffer");
+                    .js_expect("Already checked for detached buffer")?;
 
                 // b. Set srcBuffer to ? CloneArrayBuffer(srcBuffer, srcByteOffset, srcByteLength, %ArrayBuffer%).
                 // c. NOTE: %ArrayBuffer% is used to clone srcBuffer because is it known to not have any observable side-effects.
@@ -1842,18 +1857,16 @@ impl BuiltinTypedArray {
         let src_buffer = src_buf_obj.as_buffer();
         let src_buffer = src_buffer
             .bytes_with_len(src_buf_len)
-            .expect("Already checked for detached buffer");
+            .js_expect("Already checked for detached buffer")?;
 
         let mut target_buffer = target_buf_obj.as_buffer_mut();
         let mut target_buffer = target_buffer
             .bytes_with_len(target_buf_len)
-            .expect("Already checked for detached buffer");
+            .js_expect("Already checked for detached buffer")?;
 
         // 24. If srcType is the same as targetType, then
         if src_type == target_type {
-            let src_byte_index = src_byte_index as usize;
-            let target_byte_index = target_byte_index as usize;
-            let byte_count = (target_element_size * src_length) as usize;
+            let byte_count = target_element_size * src_length;
 
             // a. NOTE: If srcType and targetType are the same, the transfer must be performed in a manner that preserves the bit-level encoding of the source data.
             // b. Repeat, while targetByteIndex < limit,
@@ -1878,10 +1891,10 @@ impl BuiltinTypedArray {
         // 25. Else,
         else {
             // 23. Let limit be targetByteIndex + targetElementSize × srcLength.
-            let limit = (target_byte_index + target_element_size * src_length) as usize;
+            let limit = target_byte_index + target_element_size * src_length;
 
-            let mut src_byte_index = src_byte_index as usize;
-            let mut target_byte_index = target_byte_index as usize;
+            let mut src_byte_index = src_byte_index;
+            let mut target_byte_index = target_byte_index;
 
             // a. Repeat, while targetByteIndex < limit,
             while target_byte_index < limit {
@@ -1897,7 +1910,7 @@ impl BuiltinTypedArray {
 
                 let value = target_type
                     .get_element(&value, context)
-                    .expect("value can only be f64 or BigInt");
+                    .js_expect("value can only be f64 or BigInt")?;
 
                 // ii. Perform SetValueInBuffer(targetBuffer, targetByteIndex, targetType, value, true, Unordered).
                 // SAFETY: previous checks preserve the validity  of the indices.
@@ -1908,10 +1921,10 @@ impl BuiltinTypedArray {
                 }
 
                 // iii. Set srcByteIndex to srcByteIndex + srcElementSize.
-                src_byte_index += src_element_size as usize;
+                src_byte_index += src_element_size;
 
                 // iv. Set targetByteIndex to targetByteIndex + targetElementSize.
-                target_byte_index += target_element_size as usize;
+                target_byte_index += target_element_size;
             }
         }
 
@@ -1926,7 +1939,7 @@ impl BuiltinTypedArray {
     /// [spec]: https://tc39.es/ecma262/#sec-settypedarrayfromarraylike
     fn set_typed_array_from_array_like(
         target: &JsObject<TypedArray>,
-        target_offset: &U64OrPositiveInfinity,
+        target_offset: &UsizeOrPositiveInfinity,
         source: &JsValue,
         context: &mut Context,
     ) -> JsResult<()> {
@@ -1961,8 +1974,8 @@ impl BuiltinTypedArray {
 
         // 6. If targetOffset = +∞, throw a RangeError exception.
         let target_offset = match target_offset {
-            U64OrPositiveInfinity::U64(target_offset) => target_offset,
-            U64OrPositiveInfinity::PositiveInfinity => {
+            UsizeOrPositiveInfinity::Usize(target_offset) => target_offset,
+            UsizeOrPositiveInfinity::PositiveInfinity => {
                 return Err(JsNativeError::range()
                     .with_message("Target offset cannot be positive infinity")
                     .into());
@@ -2068,7 +2081,7 @@ impl BuiltinTypedArray {
         let end_index = min(end_index, src_borrow.data().array_length(src_buf_len));
 
         // d. Set countBytes to maxlen(endIndex - startIndex, 0).
-        let count = end_index.saturating_sub(start_index) as usize;
+        let count = end_index.saturating_sub(start_index);
 
         // The inner buffer may have resized between getting the indices and getting the buffer
         // itself. Check that the count is not zero again before proceeding.
@@ -2093,12 +2106,12 @@ impl BuiltinTypedArray {
             for (n, k) in (start_index..end_index).enumerate() {
                 // 1. Let Pk be ! ToString(𝔽(k)).
                 // 2. Let kValue be ! Get(O, Pk).
-                let k_value = src.get(k, context).expect("Get cannot fail here");
+                let k_value = src.get(k, context).js_expect("Get cannot fail here")?;
 
                 // 3. Perform ! Set(A, ! ToString(𝔽(n)), kValue, true).
                 target
                     .set(n, k_value, true, context)
-                    .expect("Set cannot fail here");
+                    .js_expect("Set cannot fail here")?;
 
                 // 4. Set k to k + 1.
                 // 5. Set n to n + 1.
@@ -2110,7 +2123,7 @@ impl BuiltinTypedArray {
 
         // g. If srcType is targetType, then
         {
-            let byte_count = count * src_type.element_size() as usize;
+            let byte_count = count * src_type.element_size();
 
             // i. NOTE: The transfer must be performed in a manner that preserves the bit-level encoding of the source data.
             // ii. Let srcBuffer be O.[[ViewedArrayBuffer]].
@@ -2123,10 +2136,10 @@ impl BuiltinTypedArray {
             let src_byte_offset = src_borrow.data().byte_offset();
 
             // vi. Let srcByteIndex be (startIndex × elementSize) + srcByteOffset.
-            let src_byte_index = (start_index * element_size + src_byte_offset) as usize;
+            let src_byte_index = start_index * element_size + src_byte_offset;
 
             // vii. Let targetByteIndex be A.[[ByteOffset]].
-            let target_byte_index = target_borrow.data().byte_offset() as usize;
+            let target_byte_index = target_borrow.data().byte_offset();
 
             // viii. Let endByteIndex be targetByteIndex + (countBytes × elementSize).
             // Not needed by the impl.
@@ -2146,7 +2159,7 @@ impl BuiltinTypedArray {
                 let mut src_buf_borrow = src_borrow.data().viewed_array_buffer().as_buffer_mut();
                 let mut src_buf = src_buf_borrow
                     .bytes_with_len(src_buf_len)
-                    .expect("already checked that the buffer is not detached");
+                    .js_expect("already checked that the buffer is not detached")?;
 
                 #[cfg(debug_assertions)]
                 {
@@ -2167,7 +2180,7 @@ impl BuiltinTypedArray {
                 let mut target_buf = target_borrow.data().viewed_array_buffer().as_buffer_mut();
                 let mut target_buf = target_buf
                     .bytes(Ordering::SeqCst)
-                    .expect("newly created array cannot be detached");
+                    .js_expect("newly created array cannot be detached")?;
 
                 #[cfg(debug_assertions)]
                 {
@@ -2229,7 +2242,7 @@ impl BuiltinTypedArray {
         for k in 0..len {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ! Get(O, Pk).
-            let k_value = ta.get(k, context).expect("Get cannot fail here");
+            let k_value = ta.get(k, context).js_expect("Get cannot fail here")?;
 
             // c. Let testResult be ! ToBoolean(? Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)).
             // d. If testResult is true, return true.
@@ -2295,7 +2308,7 @@ impl BuiltinTypedArray {
         for (j, item) in sorted.into_iter().enumerate() {
             // a. Perform ! Set(obj, ! ToString(𝔽(j)), sortedList[j], true).
             ta.set(j, item, true, context)
-                .expect("cannot fail per spec");
+                .js_expect("cannot fail per spec")?;
 
             // b. Set j to j + 1.
         }
@@ -2352,7 +2365,7 @@ impl BuiltinTypedArray {
             // a. Perform ! Set(A, ! ToString(𝔽(j)), sortedList[j], true).
             new_array
                 .set(j, item, true, context)
-                .expect("cannot fail per spec");
+                .js_expect("cannot fail per spec")?;
 
             // b. Set j to j + 1.
         }
@@ -2546,7 +2559,11 @@ impl BuiltinTypedArray {
     ///  - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-%typedarray%.prototype.values
-    fn values(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn values(
+        this: &JsValue,
+        _: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
         // 1. Let O be the this value.
         // 2. Perform ? ValidateTypedArray(O, seq-cst).
         let (ta, _) = TypedArray::validate(this, Ordering::SeqCst)?;
@@ -2595,15 +2612,21 @@ impl BuiltinTypedArray {
                 .with_message("invalid integer index for TypedArray operation")
                 .into());
         };
-        let actual_index = u64::try_from(relative_index) // should succeed if `relative_index >= 0`
-            .ok()
-            .or_else(|| len.checked_add_signed(relative_index))
-            // TODO: Replace with `is_valid_integer_index_u64` or equivalent.
-            .filter(|&rel| is_valid_integer_index(&ta.clone().upcast(), rel as f64))
-            .ok_or_else(|| {
-                JsNativeError::range()
-                    .with_message("invalid integer index for TypedArray operation")
+        let actual_index = (|| {
+            let rel = usize::try_from(relative_index).ok().or_else(|| {
+                isize::try_from(relative_index)
+                    .ok()
+                    .and_then(|i| len.checked_add_signed(i))
             })?;
+
+            let inner = ta.borrow();
+            let buf = inner.data().viewed_array_buffer().as_buffer();
+            let s = buf.bytes(Ordering::Relaxed)?;
+            inner.data().validate_index_usize(rel, s.len())
+        })()
+        .ok_or_else(|| {
+            JsNativeError::range().with_message("invalid integer index for TypedArray operation")
+        })?;
 
         // 10. Let A be ? TypedArrayCreateSameType(O, « 𝔽(len) »).
         let new_array = Self::from_kind_and_length(kind, len, context)?;
@@ -2618,12 +2641,12 @@ impl BuiltinTypedArray {
                 numeric_value.clone()
             } else {
                 // c. Else, let fromValue be ! Get(O, Pk).
-                ta.get(k, context).expect("cannot fail per the spec")
+                ta.get(k, context).js_expect("cannot fail per the spec")?
             };
             // d. Perform ! Set(A, Pk, fromValue, true).
             new_array
                 .set(k, value, true, context)
-                .expect("cannot fail per the spec");
+                .js_expect("cannot fail per the spec")?;
 
             // e. Set k to k + 1.
         }
@@ -2736,7 +2759,7 @@ impl BuiltinTypedArray {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-allocatetypedarraybuffer
     fn allocate_buffer<T: TypedArrayMarker>(
-        length: u64,
+        length: usize,
         context: &mut Context,
     ) -> JsResult<TypedArray> {
         // 1. Assert: O.[[ViewedArrayBuffer]] is undefined.
@@ -2782,7 +2805,7 @@ impl BuiltinTypedArray {
         context: &mut Context,
     ) -> JsResult<JsObject> {
         // 1. Let len be the number of elements in values.
-        let len = values.len() as u64;
+        let len = values.len();
         // 2. Perform ? AllocateTypedArrayBuffer(O, len).
         let buf = Self::allocate_buffer::<T>(len, context)?;
         let obj = JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, buf)
@@ -2815,7 +2838,7 @@ impl BuiltinTypedArray {
     /// [spec]: https://tc39.es/ecma262/#sec-allocatetypedarray
     pub(super) fn allocate<T: TypedArrayMarker>(
         new_target: &JsValue,
-        length: u64,
+        length: usize,
         context: &mut Context,
     ) -> JsResult<JsObject> {
         // 1. Let proto be ? GetPrototypeFromConstructor(newTarget, defaultProto).
@@ -2892,8 +2915,8 @@ impl BuiltinTypedArray {
         // 11. If elementType is srcType, then
 
         let new_buffer = if element_type == src_type {
-            let start = src_byte_offset as usize;
-            let count = byte_length as usize;
+            let start = src_byte_offset;
+            let count = byte_length;
             // a. Let data be ? CloneArrayBuffer(srcData, srcByteOffset, byteLength).
             src_data.subslice(start..start + count).clone(context)?
         } else {
@@ -2916,7 +2939,7 @@ impl BuiltinTypedArray {
                 let mut data = SliceRefMut::Slice(
                     data.data_mut()
                         .bytes_mut()
-                        .expect("a new buffer cannot be detached"),
+                        .js_expect("a new buffer cannot be detached")?,
                 );
 
                 // b. If srcArray.[[ContentType]] is not O.[[ContentType]], throw a TypeError exception.
@@ -2926,11 +2949,10 @@ impl BuiltinTypedArray {
                         .into());
                 }
 
-                let src_element_size = src_element_size as usize;
-                let target_element_size = element_size as usize;
+                let target_element_size = element_size;
 
                 // c. Let srcByteIndex be srcByteOffset.
-                let mut src_byte_index = src_byte_offset as usize;
+                let mut src_byte_index = src_byte_offset;
 
                 // d. Let targetByteIndex be 0.
                 let mut target_byte_index = 0;
@@ -2954,7 +2976,7 @@ impl BuiltinTypedArray {
                     // TODO: cast between types instead of converting to `JsValue`.
                     let value = element_type
                         .get_element(&value, context)
-                        .expect("value must be bigint or float");
+                        .js_expect("value must be bigint or float")?;
 
                     // ii. Perform SetValueInBuffer(data, targetByteIndex, elementType, value, true, unordered).
                     // SAFETY: The newly created buffer has at least `element_size * element_length`
@@ -3044,7 +3066,7 @@ impl BuiltinTypedArray {
             };
 
             // 7. Let bufferByteLength be ArrayBufferByteLength(buffer, seq-cst).
-            data.len() as u64
+            data.len()
         };
 
         let (byte_length, array_length) = if let Some(new_length) = new_length {
@@ -3145,8 +3167,8 @@ impl BuiltinTypedArray {
 }
 
 #[derive(Debug)]
-enum U64OrPositiveInfinity {
-    U64(u64),
+enum UsizeOrPositiveInfinity {
+    Usize(usize),
     PositiveInfinity,
 }
 
@@ -3249,10 +3271,10 @@ fn compare_typed_array_elements(
 ///  - [ECMAScript reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-isvalidintegerindex
-pub(crate) fn is_valid_integer_index(obj: &JsObject, index: f64) -> bool {
-    let inner = obj.downcast_ref::<TypedArray>().expect(
-        "integer indexed exotic method should only be callable from integer indexed objects",
-    );
+pub(crate) fn is_valid_integer_index(obj: &JsObject, index: f64) -> JsResult<bool> {
+    let inner = obj.downcast_ref::<TypedArray>().js_expect(
+        "integer indexed exotic method should only be callable from TypedArray objects",
+    )?;
 
     let buf = inner.viewed_array_buffer();
     let buf = buf.as_buffer();
@@ -3261,8 +3283,8 @@ pub(crate) fn is_valid_integer_index(obj: &JsObject, index: f64) -> bool {
     // 4. Let taRecord be MakeTypedArrayWithBufferWitnessRecord(O, unordered).
     // 5. NOTE: Bounds checking is not a synchronizing operation when O's backing buffer is a growable SharedArrayBuffer.
     let Some(buf_len) = buf.bytes(Ordering::Relaxed).map(|s| s.len()) else {
-        return false;
+        return Ok(false);
     };
 
-    inner.validate_index(index, buf_len).is_some()
+    Ok(inner.validate_index(index, buf_len).is_some())
 }

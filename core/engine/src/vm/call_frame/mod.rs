@@ -48,13 +48,14 @@ pub struct CallFrameLocation {
 pub struct CallFrame {
     pub(crate) code_block: Gc<CodeBlock>,
     pub(crate) pc: u32,
-    /// The register pointer, points to the first register in the register file.
-    pub(crate) rp: u32,
     /// The frame pointer, points to the start of this frame's data in the stack
     /// (i.e., the `this` value position).
     pub(crate) fp: u32,
     pub(crate) argument_count: u32,
     pub(crate) env_fp: u32,
+
+    /// The register pointer, points to the start of this frame's registers on the stack.
+    pub(crate) rp: u32,
 
     // Iterators and their `[[Done]]` flags that must be closed when an abrupt completion is thrown.
     pub(crate) iterators: ThinVec<IteratorRecord>,
@@ -62,7 +63,7 @@ pub struct CallFrame {
     // The stack of bindings being updated.
     // SAFETY: Nothing in `BindingLocator` requires tracing, so this is safe.
     #[unsafe_ignore_trace]
-    pub(crate) binding_stack: Vec<BindingLocator>,
+    pub(crate) binding_stack: ThinVec<BindingLocator>,
 
     /// How many iterations a loop has done.
     pub(crate) loop_iteration_count: u64,
@@ -142,12 +143,12 @@ impl CallFrame {
     ) -> Self {
         Self {
             pc: 0,
-            rp: 0,
             fp: 0,
             env_fp: 0,
             argument_count: 0,
+            rp: 0,
             iterators: ThinVec::new(),
-            binding_stack: Vec::new(),
+            binding_stack: ThinVec::new(),
             code_block,
             loop_iteration_count: 0,
             active_runnable,
@@ -183,26 +184,6 @@ impl CallFrame {
     /// Returns the index of the function in the stack.
     pub(crate) fn function_index(&self) -> usize {
         self.fp as usize + 1
-    }
-
-    /// Returns the index of the promise capability promise register in the stack.
-    pub(crate) fn promise_capability_promise_register_index(&self) -> usize {
-        self.rp as usize + Self::PROMISE_CAPABILITY_PROMISE_REGISTER_INDEX
-    }
-
-    /// Returns the index of the promise capability resolve register in the stack.
-    pub(crate) fn promise_capability_resolve_register_index(&self) -> usize {
-        self.rp as usize + Self::PROMISE_CAPABILITY_RESOLVE_REGISTER_INDEX
-    }
-
-    /// Returns the index of the promise capability reject register in the stack.
-    pub(crate) fn promise_capability_reject_register_index(&self) -> usize {
-        self.rp as usize + Self::PROMISE_CAPABILITY_REJECT_REGISTER_INDEX
-    }
-
-    /// Returns the index of the async generator object register in the stack.
-    pub(crate) fn async_generator_object_register_index(&self) -> usize {
-        self.rp as usize + Self::ASYNC_GENERATOR_OBJECT_REGISTER_INDEX
     }
 
     /// Returns the range of the arguments in the stack.
@@ -245,13 +226,6 @@ impl CallFrame {
     }
 }
 
-/// ---- `CallFrame` stack methods ----
-impl CallFrame {
-    pub(crate) fn set_register_pointer(&mut self, pointer: u32) {
-        self.rp = pointer;
-    }
-}
-
 /// Indicates how a generator function that has been called/resumed should return.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -282,10 +256,10 @@ impl JsValue {
                 0 => return GeneratorResumeKind::Normal,
                 1 => return GeneratorResumeKind::Throw,
                 2 => return GeneratorResumeKind::Return,
-                _ => unreachable!("generator kind must be a integer between 1..=2, got {value}"),
+                _ => unreachable!("generator kind must be an integer between 1..=2, got {value}"),
             }
         }
 
-        unreachable!("generator kind must be a integer type")
+        unreachable!("generator kind must be an integer type")
     }
 }
