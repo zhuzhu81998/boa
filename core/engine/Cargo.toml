@@ -14,6 +14,10 @@ rust-version.workspace = true
 [features]
 default = ["float16", "xsum", "temporal"]
 
+# Enables the experimental copy-and-patch baseline JIT. The first implementation is
+# available on x86-64 Unix targets and deliberately performs no value specialization.
+jit = ["dep:libc"]
+
 embedded_lz4 = ["boa_macros/embedded_lz4", "lz4_flex"]
 
 # Replace the NaN-boxing implementation of `JsValueInner` with an
@@ -142,6 +146,7 @@ dynify = { workspace = true, features = ["macros"] }
 futures-concurrency.workspace = true
 oneshot = { workspace = true, features = ["async"] }
 async-channel.workspace = true
+libc = { workspace = true, optional = true }
 
 # intl deps
 boa_icu_provider = { workspace = true, features = ["std"], optional = true }
@@ -195,6 +200,9 @@ iana-time-zone = { workspace = true, optional = true }
 web-time = { workspace = true, optional = true }
 # NOTE: This enables the wasm_js required for rand to work on wasm
 getrandom = { workspace = true, features = ["wasm_js"], optional = true }
+
+[build-dependencies]
+object.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

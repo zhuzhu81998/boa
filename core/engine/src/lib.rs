@@ -91,6 +91,9 @@ pub mod environments;
 pub mod error;
 pub mod interop;
 pub mod job;
+
+#[cfg(boa_jit_stencils)]
+mod jit;
 pub mod module;
 pub mod native_function;
 pub mod object;
