@@ -986,6 +986,9 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        #[cfg(boa_jit_stencils)]
+        let mut jit_code: Option<(*const u8, usize, crate::jit::JitCode)> = None;
+
         while let Some(byte) = self
             .vm
             .frame()
@@ -996,10 +999,31 @@ impl Context {
         {
             let opcode = Opcode::decode(*byte);
 
+            #[cfg(boa_jit_stencils)]
+            let jit_entry = {
+                let bytecode = &self.vm.frame().code_block.bytecode;
+                let identity = (bytecode.bytes.as_ptr(), bytecode.bytes.len());
+                let stale = jit_code
+                    .as_ref()
+                    .is_none_or(|(pointer, length, _)| (*pointer, *length) != identity);
+                if stale {
+                    jit_code = crate::jit::JitCode::compile(bytecode)
+                        .map(|code| (identity.0, identity.1, code));
+                }
+                jit_code
+                    .as_ref()
+                    .and_then(|(_, _, code)| code.entry(self.vm.frame().pc as usize))
+            };
+
             match self.execute_one(
                 |context, opcode| {
                     let frame = context.vm.frame();
                     let pc = frame.pc as usize;
+
+                    #[cfg(boa_jit_stencils)]
+                    if let Some(entry) = jit_entry {
+                        return crate::jit::execute(entry, context, pc);
+                    }
 
                     OPCODE_HANDLERS[opcode as usize](context, pc)
                 },
