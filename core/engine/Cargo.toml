@@ -203,6 +203,7 @@ getrandom = { workspace = true, features = ["wasm_js"], optional = true }
 
 [build-dependencies]
 object.workspace = true
+llvm-sys.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

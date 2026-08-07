@@ -1,8 +1,6 @@
-//! Minimal copy-and-patch baseline JIT.
+//! Copy-and-patch baseline JIT support.
 //!
-//! A compiled function is an executable allocation containing one generic stencil for every
-//! bytecode instruction. Stencils carry no bytecode operands or runtime values. Their sole
-//! relocation is patched to the corresponding, already-linked interpreter opcode handler.
+//! Build-generated emitters copy actual opcode-handler text and record structural relocations.
 
 use crate::{
     Context,
@@ -11,45 +9,223 @@ use crate::{
         opcode::{Bytecode, InstructionIterator, OPCODE_HANDLERS},
     },
 };
-use std::{mem::transmute, ops::ControlFlow, ptr};
-
-pub(super) type Emitter = fn(&mut Vec<u8>, &mut Vec<PendingRelocation>) -> usize;
-
-pub(super) struct PendingRelocation {
-    offset: usize,
-    addend: i64,
-    handler: usize,
-}
-
-fn emit_stencil(
-    code: &mut Vec<u8>,
-    relocations: &mut Vec<PendingRelocation>,
-    stencil: &[u8],
-    relocation_offset: usize,
-    addend: i64,
-    handler: usize,
-) -> usize {
-    let padding = code.len().next_multiple_of(16) - code.len();
-    code.resize(code.len() + padding, 0x90);
-    let entry = code.len();
-    code.extend_from_slice(stencil);
-    relocations.push(PendingRelocation {
-        offset: entry + relocation_offset,
-        addend,
-        handler,
-    });
-    entry
-}
-
-include!(concat!(env!("OUT_DIR"), "/jit_stencils_generated.rs"));
-
-// The opcode macro deliberately fills the complete byte namespace. This keeps the generated
-// emitter library and the current checkout's handler table in lockstep.
-const _: [(); 256] = [(); OPCODE_HANDLERS.len()];
+use std::{fmt, mem::transmute, ops::ControlFlow, ptr};
 
 type JitEntry = unsafe fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
+pub(super) type Emitter = fn(&mut FunctionBuilder) -> Result<usize, JitError>;
 
-/// Executable code for one bytecode array. `entries` is indexed by bytecode PC.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Some template objects do not contain every supported ELF kind.
+pub(super) enum RelocationKind {
+    Relative,
+    PltRelative,
+    GotRelative,
+    Absolute,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RelocationTarget {
+    Internal(usize),
+    External(usize),
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StencilRelocation {
+    offset: u32,
+    addend: i64,
+    size: u8,
+    kind: RelocationKind,
+    target: RelocationTarget,
+}
+
+#[derive(Debug)]
+pub(super) enum JitError {
+    MissingExternal(&'static str),
+    InvalidRelocation { offset: usize, size: u8 },
+    RelocationOverflow { offset: usize, size: u8 },
+    Allocation,
+}
+
+impl fmt::Display for JitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingExternal(name) => write!(f, "unresolved stencil external {name}"),
+            Self::InvalidRelocation { offset, size } => {
+                write!(f, "invalid {size}-bit stencil relocation at {offset:#x}")
+            }
+            Self::RelocationOverflow { offset, size } => {
+                write!(f, "{size}-bit stencil relocation at {offset:#x} overflowed")
+            }
+            Self::Allocation => f.write_str("could not allocate executable JIT memory"),
+        }
+    }
+}
+
+struct PendingRelocation {
+    field: usize,
+    addend: i64,
+    size: u8,
+    kind: RelocationKind,
+    target: RelocationTarget,
+}
+
+pub(super) struct FunctionBuilder {
+    code: Vec<u8>,
+    relocations: Vec<PendingRelocation>,
+}
+
+impl FunctionBuilder {
+    fn new() -> Result<Self, JitError> {
+        let mut builder = Self {
+            code: Vec::new(),
+            relocations: Vec::new(),
+        };
+        let closure = builder.append_stencil(INTERNAL_CLOSURE_BLOB, INTERNAL_CLOSURE_RELOCS)?;
+        debug_assert_eq!(closure, 0);
+        Ok(builder)
+    }
+
+    pub(super) fn append_stencil(
+        &mut self,
+        stencil: &[u8],
+        relocations: &[StencilRelocation],
+    ) -> Result<usize, JitError> {
+        self.code.resize(self.code.len().next_multiple_of(16), 0x90);
+        let entry = self.code.len();
+        self.code.extend_from_slice(stencil);
+        for relocation in relocations {
+            let field = entry + relocation.offset as usize;
+            let bytes = usize::from(relocation.size / 8);
+            if relocation.size % 8 != 0
+                || !matches!(bytes, 1 | 2 | 4 | 8)
+                || field
+                    .checked_add(bytes)
+                    .is_none_or(|end| end > self.code.len())
+            {
+                return Err(JitError::InvalidRelocation {
+                    offset: field,
+                    size: relocation.size,
+                });
+            }
+            self.relocations.push(PendingRelocation {
+                field,
+                addend: relocation.addend,
+                size: relocation.size,
+                kind: relocation.kind,
+                target: relocation.target,
+            });
+        }
+        Ok(entry)
+    }
+
+    fn finish(mut self) -> Result<ExecutableMemory, JitError> {
+        let relocations = std::mem::take(&mut self.relocations);
+        let mut resolved = Vec::with_capacity(relocations.len());
+        for relocation in relocations {
+            let target = match relocation.target {
+                RelocationTarget::External(index) => Target::Absolute(external_address(index)?),
+                RelocationTarget::Internal(offset) => Target::Offset(offset),
+            };
+            let patch_target = match relocation.kind {
+                RelocationKind::PltRelative if matches!(target, Target::Absolute(_)) => {
+                    let (island, pointer) = self.append_pointer_cell(true);
+                    resolved.push((pointer, 0, 64, RelocationKind::Absolute, target));
+                    Target::Offset(island)
+                }
+                RelocationKind::GotRelative => {
+                    let (cell, pointer) = self.append_pointer_cell(false);
+                    debug_assert_eq!(cell, pointer);
+                    resolved.push((pointer, 0, 64, RelocationKind::Absolute, target));
+                    Target::Offset(cell)
+                }
+                RelocationKind::Relative
+                | RelocationKind::PltRelative
+                | RelocationKind::Absolute => target,
+            };
+            resolved.push((
+                relocation.field,
+                relocation.addend,
+                relocation.size,
+                relocation.kind,
+                patch_target,
+            ));
+        }
+        let mut memory = ExecutableMemory::allocate(self.code.len())?;
+        let base = memory.as_ptr() as usize;
+        for (field, addend, size, kind, target) in resolved {
+            let target = match target {
+                Target::Absolute(value) => value,
+                Target::Offset(offset) => base + offset,
+            };
+            let value = match kind {
+                RelocationKind::Relative
+                | RelocationKind::PltRelative
+                | RelocationKind::GotRelative => {
+                    target as i128 + addend as i128 - (base + field) as i128
+                }
+                RelocationKind::Absolute => target as i128 + addend as i128,
+            };
+            write_relocation(&mut self.code, field, size, value)?;
+        }
+        memory.write_and_make_executable(&self.code)?;
+        Ok(memory)
+    }
+
+    fn append_pointer_cell(&mut self, branch_island: bool) -> (usize, usize) {
+        self.code.resize(self.code.len().next_multiple_of(8), 0);
+        let entry = self.code.len();
+        if branch_island {
+            self.code.extend_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
+        }
+        let pointer = self.code.len();
+        self.code.extend_from_slice(&[0; size_of::<usize>()]);
+        (entry, pointer)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    Absolute(usize),
+    Offset(usize),
+}
+
+fn write_relocation(code: &mut [u8], offset: usize, size: u8, value: i128) -> Result<(), JitError> {
+    let width = usize::from(size / 8);
+    let fits = if size == 64 {
+        value >= 0 && value <= u64::MAX as i128
+    } else {
+        let shift = 128 - u32::from(size);
+        (value << shift >> shift) == value
+    };
+    if !fits {
+        return Err(JitError::RelocationOverflow { offset, size });
+    }
+    let bytes = (value as u64).to_le_bytes();
+    code[offset..offset + width].copy_from_slice(&bytes[..width]);
+    Ok(())
+}
+
+static STENCIL_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/jit_stencils.bin"));
+static INTERNAL_CLOSURE_BLOB: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/jit_internal_closure.bin"));
+include!(concat!(env!("OUT_DIR"), "/jit_stencils_generated.rs"));
+
+const _: [(); 256] = [(); OPCODE_HANDLERS.len()];
+
+fn external_address(index: usize) -> Result<usize, JitError> {
+    // The typed LLVM resolver-object stage will provide this exact-name table. Never use dlsym:
+    // the native linker must retain and resolve every external dependency before Boa starts.
+    let name = EXTERNAL_NAMES
+        .get(index)
+        .copied()
+        .ok_or(JitError::MissingExternal("<invalid external index>"))?;
+    let address = unsafe { BOA_JIT_EXTERNAL_SYMBOLS[index] };
+    if address == 0 {
+        return Err(JitError::MissingExternal(name));
+    }
+    Ok(address)
+}
+
 pub(crate) struct JitCode {
     memory: ExecutableMemory,
     entries: Box<[usize]>,
@@ -57,37 +233,23 @@ pub(crate) struct JitCode {
 
 impl JitCode {
     pub(crate) fn compile(bytecode: &Bytecode) -> Option<Self> {
-        let mut code = Vec::new();
-        let mut relocations = Vec::new();
+        let mut builder = FunctionBuilder::new().ok()?;
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
-            entries[pc] = EMITTERS[opcode as usize](&mut code, &mut relocations);
+            entries[pc] = EMITTERS[opcode as usize](&mut builder).ok()?;
         }
-        if code.is_empty() {
+        if builder.code.is_empty() {
             return None;
         }
-        for relocation in relocations {
-            // The typed table reference keeps every handler linked and gives us its post-loader
-            // address. No symbol lookup or runtime semantic dispatch remains in the stencil.
-            let handler = OPCODE_HANDLERS[relocation.handler] as *const () as usize;
-            let value = handler
-                .wrapping_add_signed(relocation.addend as isize)
-                .to_ne_bytes();
-            code[relocation.offset..relocation.offset + value.len()].copy_from_slice(&value);
-        }
         Some(Self {
-            memory: ExecutableMemory::new(&code)?,
+            memory: builder.finish().ok()?,
             entries: entries.into_boxed_slice(),
         })
     }
 
     pub(crate) fn entry(&self, pc: usize) -> Option<JitEntry> {
         let offset = *self.entries.get(pc)?;
-        if offset == usize::MAX {
-            return None;
-        }
-        // SAFETY: the entry is a tail-jump stencil to a function with exactly `JitEntry`'s ABI.
-        Some(unsafe { transmute(self.memory.as_ptr().add(offset)) })
+        (offset != usize::MAX).then(|| unsafe { transmute(self.memory.as_ptr().add(offset)) })
     }
 }
 
@@ -96,7 +258,6 @@ pub(crate) fn execute(
     context: &mut Context,
     pc: usize,
 ) -> ControlFlow<CompletionRecord> {
-    // SAFETY: `entry` belongs to the live `JitCode` held by the VM loop.
     unsafe { entry(context, pc) }
 }
 
@@ -106,8 +267,7 @@ struct ExecutableMemory {
 }
 
 impl ExecutableMemory {
-    fn new(code: &[u8]) -> Option<Self> {
-        let length = code.len();
+    fn allocate(length: usize) -> Result<Self, JitError> {
         let raw = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -119,17 +279,27 @@ impl ExecutableMemory {
             )
         };
         if raw == libc::MAP_FAILED {
-            return None;
+            return Err(JitError::Allocation);
         }
-        unsafe { ptr::copy_nonoverlapping(code.as_ptr(), raw.cast::<u8>(), length) };
-        if unsafe { libc::mprotect(raw, length, libc::PROT_READ | libc::PROT_EXEC) } != 0 {
-            unsafe { libc::munmap(raw, length) };
-            return None;
-        }
-        Some(Self {
-            pointer: ptr::NonNull::new(raw.cast())?,
+        Ok(Self {
+            pointer: ptr::NonNull::new(raw.cast()).ok_or(JitError::Allocation)?,
             length,
         })
+    }
+
+    fn write_and_make_executable(&mut self, code: &[u8]) -> Result<(), JitError> {
+        unsafe { ptr::copy_nonoverlapping(code.as_ptr(), self.pointer.as_ptr(), code.len()) };
+        if unsafe {
+            libc::mprotect(
+                self.pointer.as_ptr().cast(),
+                self.length,
+                libc::PROT_READ | libc::PROT_EXEC,
+            )
+        } != 0
+        {
+            return Err(JitError::Allocation);
+        }
+        Ok(())
     }
 
     fn as_ptr(&self) -> *mut u8 {
@@ -139,6 +309,8 @@ impl ExecutableMemory {
 
 impl Drop for ExecutableMemory {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.pointer.as_ptr().cast(), self.length) };
+        unsafe {
+            libc::munmap(self.pointer.as_ptr().cast(), self.length);
+        }
     }
 }

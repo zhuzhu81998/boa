@@ -123,7 +123,8 @@ dashmap = "6.2.1"
 num_enum = "0.7.6"
 itertools = { version = "0.15.0", default-features = false }
 libc = "0.2.1"
-object = { version = "0.37.3", default-features = false, features = ["read_core", "elf"] }
+object = { version = "0.37.3", default-features = false, features = ["read_core", "archive", "elf"] }
+llvm-sys = { version = "221.0.1", default-features = false, features = ["prefer-dynamic"] }
 portable-atomic = "1.13.1"
 bytemuck = { version = "1.25.0", default-features = false }
 arrayvec = "0.7.6"

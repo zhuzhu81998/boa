@@ -417,6 +417,10 @@ macro_rules! generate_opcodes {
             ]
         };
 
+        #[cfg(feature = "jit")]
+        #[unsafe(no_mangle)]
+        pub(crate) static BOA_JIT_TEMPLATE_HANDLERS: [OpcodeHandler; 256] = OPCODE_HANDLERS;
+
         type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
 
         pub(crate) const OPCODE_HANDLERS_BUDGET: [OpcodeHandlerBudget; 256] = {
@@ -429,7 +433,9 @@ macro_rules! generate_opcodes {
 
         $(
             pastey::paste! {
-                #[inline(always)]
+                #[cfg_attr(feature = "jit", unsafe(no_mangle))]
+                #[cfg_attr(feature = "jit", inline(never))]
+                #[cfg_attr(not(feature = "jit"), inline(always))]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
                     let bytes = &context.vm.frame().code_block.bytecode.bytes;
