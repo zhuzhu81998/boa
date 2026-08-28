@@ -1,4 +1,6 @@
-use object::{Object, ObjectSymbol, SymbolIndex, SymbolSection, read::archive::ArchiveFile};
+use object::{
+    Object, ObjectSection, ObjectSymbol, SymbolIndex, SymbolSection, read::archive::ArchiveFile,
+};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -129,4 +131,40 @@ impl TemplateArchive {
             .ok_or("invalid archive member id")?;
         object::File::parse(bytes.as_slice()).map_err(|e| e.to_string())
     }
+}
+
+pub(super) fn read_u64_symbol(data: &[u8], name: &str) -> Result<u64, String> {
+    let archive = TemplateArchive::parse(data)?;
+    let reference = archive
+        .definition(name)?
+        .ok_or_else(|| format!("template archive does not define {name}"))?;
+    let file = archive.file(reference.member)?;
+    let symbol = file
+        .symbol_by_index(reference.symbol)
+        .map_err(|error| error.to_string())?;
+    if symbol.size() != 8 {
+        return Err(format!("{name} has size {}, expected 8", symbol.size()));
+    }
+    let section_index = symbol
+        .section_index()
+        .ok_or_else(|| format!("{name} has no section"))?;
+    let section = file
+        .section_by_index(section_index)
+        .map_err(|error| error.to_string())?;
+    let offset = symbol
+        .address()
+        .checked_sub(section.address())
+        .ok_or_else(|| format!("invalid {name} address"))? as usize;
+    let bytes: [u8; 8] = section
+        .data()
+        .map_err(|error| error.to_string())?
+        .get(offset..offset + 8)
+        .ok_or_else(|| format!("invalid {name} data range"))?
+        .try_into()
+        .map_err(|_| format!("invalid {name} value"))?;
+    Ok(if file.is_little_endian() {
+        u64::from_le_bytes(bytes)
+    } else {
+        u64::from_be_bytes(bytes)
+    })
 }

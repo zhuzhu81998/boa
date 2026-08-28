@@ -45,6 +45,7 @@ struct Stencil {
     name: String,
     bytes: Vec<u8>,
     relocations: Vec<Reloc>,
+    unsupported: Option<String>,
 }
 
 struct ClosureSection {
@@ -62,6 +63,7 @@ pub(super) struct Generated {
     pub(super) bytes: usize,
     pub(super) relocations: usize,
     pub(super) externals: usize,
+    pub(super) supported: usize,
 }
 
 pub(super) fn generate(
@@ -84,20 +86,50 @@ pub(super) fn generate(
     let stencils = extract_stencils(&archive, &boa_file, &roots)?;
     let mut externalized = BTreeSet::new();
     let mut external_names = BTreeSet::new();
-    let mut classifications = BTreeMap::new();
-    let mut closure = collect_closure(
-        &archive,
-        &stencils,
-        &mut externalized,
-        &mut external_names,
-        &mut classifications,
-        boa_member,
-        &module_symbols,
-        &boa_file,
-    )?;
+    let mut closure_by_id = BTreeMap::new();
+    let mut supported = BTreeSet::new();
+    for (opcode, stencil) in stencils.iter().enumerate() {
+        if let Some(error) = &stencil.unsupported {
+            println!(
+                "cargo::warning=JIT opcode {opcode} ({}) unsupported: {error}",
+                stencil.name
+            );
+            continue;
+        }
+        let mut opcode_externalized = BTreeSet::new();
+        let mut opcode_externals = BTreeSet::new();
+        let mut classifications = BTreeMap::new();
+        match collect_closure(
+            &archive,
+            std::slice::from_ref(stencil),
+            &mut opcode_externalized,
+            &mut opcode_externals,
+            &mut classifications,
+            boa_member,
+            &module_symbols,
+            &boa_file,
+        ) {
+            Ok(sections) => {
+                supported.insert(opcode);
+                externalized.extend(opcode_externalized);
+                external_names.extend(opcode_externals);
+                for section in sections {
+                    closure_by_id.entry(section.id).or_insert(section);
+                }
+            }
+            Err(error) => println!(
+                "cargo::warning=JIT opcode {opcode} ({}) unsupported: {error}",
+                stencil.name
+            ),
+        }
+    }
+    let mut closure: Vec<_> = closure_by_id.into_values().collect();
     layout_closure(&mut closure)?;
 
-    for stencil in &stencils {
+    for (opcode, stencil) in stencils.iter().enumerate() {
+        if !supported.contains(&opcode) {
+            continue;
+        }
         for relocation in &stencil.relocations {
             if let Target::External(name) = &relocation.target {
                 external_names.insert(name.clone());
@@ -125,6 +157,7 @@ pub(super) fn generate(
         &closure,
         &externalized,
         &external,
+        &supported,
         &out,
     )?;
 
@@ -141,6 +174,7 @@ pub(super) fn generate(
                 .map(|section| section.relocations.len())
                 .sum::<usize>(),
         externals: external.len(),
+        supported: supported.len(),
     })
 }
 
@@ -216,24 +250,32 @@ fn extract_stencils(
             .ok_or_else(|| format!("invalid code range for {name:?}"))?
             .to_vec();
         let mut relocations = Vec::new();
+        let mut unsupported = None;
         for (offset, relocation) in section.relocations() {
             let offset = offset as usize;
             if !(start..end).contains(&offset) {
                 continue;
             }
-            relocations.push(read_relocation(
+            match read_relocation(
                 archive,
                 &file,
                 root.member,
                 offset - start,
                 relocation,
                 &name,
-            )?);
+            ) {
+                Ok(parsed) => relocations.push(parsed),
+                Err(error) => {
+                    unsupported = Some(error);
+                    break;
+                }
+            }
         }
         stencils.push(Stencil {
             name,
             bytes,
             relocations,
+            unsupported,
         });
     }
     Ok(stencils)
@@ -323,9 +365,15 @@ fn queue_target(
     boa_file: &object::File<'_>,
 ) -> Result<(), String> {
     let Target::Internal(target) = target else {
-        if let Target::External(name) = target {
-            external_names.insert(name.clone());
+        let Target::External(name) = target else {
+            unreachable!()
+        };
+        if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
+            return Err(format!(
+                "external symbol {name:?} has no typed declaration in boa_engine.ll"
+            ));
         }
+        external_names.insert(name.clone());
         return Ok(());
     };
     let classification = classify_symbol(
@@ -369,14 +417,9 @@ fn classify_symbol(
         if name.is_empty() {
             return Err("cross-module target has no linker name".into());
         }
-        if !module_symbols.is_declaration(name) {
-            let status = if module_symbols.is_definition(name) {
-                "defined by boa_engine.ll but stored outside its owning archive member"
-            } else {
-                "absent from boa_engine.ll"
-            };
+        if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
             return Err(format!(
-                "cross-module symbol {name:?} is {status}; cannot recover its LLVM type"
+                "cross-module symbol {name:?} has no typed declaration in boa_engine.ll"
             ));
         }
         let classification = Classification::External(name.to_owned());
@@ -433,7 +476,8 @@ fn classify_symbol(
             if section.kind() != SectionKind::Text
                 || !symbol.is_global()
                 || name.is_empty()
-                || !(module_symbols.is_definition(name) || module_symbols.is_declaration(name))
+                || !(module_symbols.is_linkable_definition(name)
+                    || module_symbols.is_declaration(name))
             {
                 Classification::Reject(format!(
                     "cannot externalize non-global target {name:?} in section {:?} ({:?}): {error}",
@@ -508,8 +552,9 @@ fn validate_relocation(relocation: &object::Relocation) -> Result<(), String> {
             | RelocationKind::Absolute
     ) {
         return Err(format!(
-            "unsupported archive relocation kind {:?}",
-            relocation.kind()
+            "unsupported archive relocation kind {:?} ({:?})",
+            relocation.kind(),
+            relocation.flags()
         ));
     }
     if !matches!(
@@ -629,6 +674,7 @@ fn emit_metadata(
     closure: &[ClosureSection],
     externalized: &BTreeSet<SymbolRef>,
     external: &BTreeMap<String, usize>,
+    supported: &BTreeSet<usize>,
     out: &Path,
 ) -> Result<(), String> {
     let mut stencil_blob = Vec::new();
@@ -668,6 +714,13 @@ fn emit_metadata(
     }
     generated.push_str("];\n\n");
     for (opcode, stencil) in stencils.iter().enumerate() {
+        if !supported.contains(&opcode) {
+            generated.push_str(&format!(
+                "// opcode {opcode}: {} (unsupported)\n",
+                stencil.name
+            ));
+            continue;
+        }
         let start = stencil_blob.len();
         stencil_blob.extend_from_slice(&stencil.bytes);
         generated.push_str(&format!("// opcode {opcode}: {}\n", stencil.name));
@@ -691,11 +744,15 @@ fn emit_metadata(
         ));
     }
     generated.push_str(&format!(
-        "pub(super) static EMITTERS: [Emitter; {0}] = [\n",
+        "pub(super) static EMITTERS: [Option<Emitter>; {0}] = [\n",
         stencils.len()
     ));
     for opcode in 0..stencils.len() {
-        generated.push_str(&format!("    emit_{opcode:03},\n"));
+        if supported.contains(&opcode) {
+            generated.push_str(&format!("    Some(emit_{opcode:03}),\n"));
+        } else {
+            generated.push_str("    None,\n");
+        }
     }
     generated.push_str("];\n");
     fs::write(out.join("jit_stencils.bin"), stencil_blob).map_err(|e| e.to_string())?;

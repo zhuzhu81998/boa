@@ -24,6 +24,32 @@ use std::{
 
 const OPCODE_COUNT: usize = 256;
 const HANDLER_TABLE: &str = "BOA_JIT_TEMPLATE_HANDLERS";
+const CONFIG_SYMBOL: &str = "BOA_JIT_TEMPLATE_CONFIG";
+
+fn jit_config() -> (u64, String) {
+    let mut entries: Vec<String> = env::vars()
+        .filter_map(|(name, _)| name.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
+        .collect();
+    for name in [
+        "CARGO_CFG_TARGET_ARCH",
+        "CARGO_CFG_TARGET_OS",
+        "CARGO_CFG_TARGET_ENV",
+        "CARGO_CFG_TARGET_FAMILY",
+        "CARGO_CFG_TARGET_ENDIAN",
+        "CARGO_CFG_TARGET_POINTER_WIDTH",
+        "CARGO_CFG_PANIC",
+    ] {
+        entries.push(format!("{name}={}", env::var(name).unwrap_or_default()));
+    }
+    entries.sort();
+    let description = entries.join(",");
+    let mut fingerprint = 0xcbf29ce484222325_u64;
+    for byte in description.bytes() {
+        fingerprint ^= u64::from(byte);
+        fingerprint = fingerprint.wrapping_mul(0x100000001b3);
+    }
+    (fingerprint, description)
+}
 
 fn main() {
     println!("cargo::rerun-if-changed=src/vm/opcode/mod.rs");
@@ -31,10 +57,21 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(boa_jit_stencils)");
     println!("cargo::rerun-if-env-changed=BOA_JIT_BUILD_TEMPLATE");
     println!("cargo::rerun-if-env-changed=BOA_JIT_TEMPLATE_ARCHIVE");
+    println!("cargo::rerun-if-env-changed=BOA_JIT_TEMPLATE_LLVM_IR");
+    println!("cargo::rerun-if-env-changed=BOA_JIT_REUSE_GENERATED");
 
     if env::var_os("CARGO_FEATURE_JIT").is_none() {
         return;
     }
+    let (config_fingerprint, config_description) = jit_config();
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is missing"));
+    fs::write(
+        out.join("jit_config_generated.rs"),
+        format!(
+            "#[allow(missing_docs)]\n#[unsafe(no_mangle)]\n#[used]\npub static {CONFIG_SYMBOL}: u64 = {config_fingerprint:#018x};\n"
+        ),
+    )
+    .expect("cannot write JIT configuration marker");
     let arch = env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo must set target arch");
     let family = env::var("CARGO_CFG_TARGET_FAMILY").expect("Cargo must set target family");
     if arch != "x86_64" || family != "unix" {
@@ -49,6 +86,12 @@ fn main() {
         println!("cargo::rerun-if-changed={}", archive_path.display());
         let archive_data = fs::read(&archive_path)
             .unwrap_or_else(|error| panic!("cannot read JIT template archive: {error}"));
+        let template_fingerprint = template_archive::read_u64_symbol(&archive_data, CONFIG_SYMBOL)
+            .unwrap_or_else(|error| panic!("invalid JIT template configuration marker: {error}"));
+        assert_eq!(
+            template_fingerprint, config_fingerprint,
+            "JIT template/runtime configuration mismatch (template {template_fingerprint:#018x}, runtime {config_fingerprint:#018x}). Rebuild both template artifacts with the exact boa_engine features used by this target. Runtime configuration: {config_description}"
+        );
         let llvm_ir = env::var_os("BOA_JIT_TEMPLATE_LLVM_IR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -57,20 +100,32 @@ fn main() {
                 )
             });
         println!("cargo::rerun-if-changed={}", llvm_ir.display());
-        let generated =
-            archive_closure::generate(&archive_data, HANDLER_TABLE, OPCODE_COUNT, &llvm_ir)
-                .unwrap_or_else(|error| panic!("invalid archive closure: {error}"));
-        println!(
-            "cargo::warning=JIT archive generator: {} members, {} closure sections, {} bytes, {} relocations, {} externals",
-            generated.members,
-            generated.sections,
-            generated.bytes,
-            generated.relocations,
-            generated.externals
-        );
-        let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is missing"));
+        let reusable = [
+            "jit_stencils.bin",
+            "jit_internal_closure.bin",
+            "jit_stencils_generated.rs",
+            "libboa_jit_resolver.a",
+        ]
+        .iter()
+        .all(|name| out.join(name).is_file());
+        if env::var_os("BOA_JIT_REUSE_GENERATED").is_some() && reusable {
+            println!("cargo::warning=reusing existing JIT stencil and resolver artifacts");
+        } else {
+            let generated =
+                archive_closure::generate(&archive_data, HANDLER_TABLE, OPCODE_COUNT, &llvm_ir)
+                    .unwrap_or_else(|error| panic!("invalid archive closure: {error}"));
+            println!(
+                "cargo::warning=JIT archive generator: {} members, {} closure sections, {} bytes, {} relocations, {} externals, {} supported opcodes",
+                generated.members,
+                generated.sections,
+                generated.bytes,
+                generated.relocations,
+                generated.externals,
+                generated.supported
+            );
+        }
         println!("cargo::rustc-link-search=native={}", out.display());
-        println!("cargo::rustc-link-lib=static=boa_jit_resolver");
+        println!("cargo::rustc-link-lib=static:-bundle=boa_jit_resolver");
         println!("cargo::rustc-cfg=boa_jit_stencils");
         return;
     }
@@ -206,7 +261,7 @@ fn generate(object_path: &Path, llvm_ir: &Path) -> Result<(), String> {
     let names: Vec<String> = external_symbols.keys().cloned().collect();
     llvm_resolver::generate(llvm_ir, &names, &out)?;
     println!("cargo::rustc-link-search=native={}", out.display());
-    println!("cargo::rustc-link-lib=static=boa_jit_resolver");
+    println!("cargo::rustc-link-lib=static:-bundle=boa_jit_resolver");
     emit_metadata(&file, &stencils, &closure, &externalized, &external_symbols)
 }
 

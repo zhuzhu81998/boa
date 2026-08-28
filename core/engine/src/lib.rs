@@ -92,6 +92,9 @@ pub mod error;
 pub mod interop;
 pub mod job;
 
+#[cfg(feature = "jit")]
+include!(concat!(env!("OUT_DIR"), "/jit_config_generated.rs"));
+
 #[cfg(boa_jit_stencils)]
 mod jit;
 pub mod module;
