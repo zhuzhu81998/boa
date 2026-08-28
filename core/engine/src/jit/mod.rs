@@ -23,6 +23,7 @@ pub(super) enum RelocationKind {
     Absolute,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(super) enum RelocationTarget {
     Internal(usize),
@@ -236,7 +237,9 @@ impl JitCode {
         let mut builder = FunctionBuilder::new().ok()?;
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
-            entries[pc] = EMITTERS[opcode as usize](&mut builder).ok()?;
+            if let Some(emitter) = EMITTERS[opcode as usize] {
+                entries[pc] = emitter(&mut builder).ok()?;
+            }
         }
         if builder.code.is_empty() {
             return None;

@@ -2,15 +2,10 @@
 
 use llvm_sys::{
     LLVMLinkage,
+    bit_writer::LLVMWriteBitcodeToFile,
     core::*,
     ir_reader::LLVMParseIRInContext2,
     prelude::{LLVMContextRef, LLVMMemoryBufferRef, LLVMModuleRef, LLVMTypeRef, LLVMValueRef},
-    target::{LLVM_InitializeNativeAsmPrinter, LLVM_InitializeNativeTarget},
-    target_machine::{
-        LLVMCodeGenFileType, LLVMCodeGenOptLevel, LLVMCodeModel, LLVMCreateTargetMachine,
-        LLVMDisposeTargetMachine, LLVMGetTargetFromTriple, LLVMRelocMode,
-        LLVMTargetMachineEmitToFile,
-    },
 };
 use std::{
     collections::BTreeSet,
@@ -105,8 +100,13 @@ unsafe fn generate_in_context(
     LLVMSetGlobalConstant(table, 1);
     LLVMSetLinkage(table, LLVMLinkage::LLVMExternalLinkage);
 
-    let object = out.join("boa_jit_resolver.o");
-    emit_object(resolver, &object)?;
+    let object = out.join("boa_jit_resolver.bc");
+    let filename = path_cstring(&object)?;
+    if LLVMWriteBitcodeToFile(resolver, filename.as_ptr()) != 0 {
+        LLVMDisposeModule(resolver);
+        LLVMDisposeModule(original);
+        return Err(format!("could not write {}", object.display()));
+    }
     LLVMDisposeModule(resolver);
     LLVMDisposeModule(original);
 
@@ -132,63 +132,52 @@ unsafe fn add_compiler_runtime(
     rust_name: &str,
     name: *const i8,
 ) -> Option<LLVMValueRef> {
-    let pointer = LLVMPointerTypeInContext(context, 0);
-    let i32_type = LLVMInt32TypeInContext(context);
-    let i64_type = LLVMInt64TypeInContext(context);
-    let f64_type = LLVMDoubleTypeInContext(context);
-    let (result, mut parameters): (LLVMTypeRef, Vec<LLVMTypeRef>) = match rust_name {
-        "memcpy" | "memmove" => (pointer, vec![pointer, pointer, i64_type]),
-        "memset" => (pointer, vec![pointer, i32_type, i64_type]),
-        "__powidf2" => (f64_type, vec![f64_type, i32_type]),
-        "floor" | "ceil" | "trunc" | "round" | "sqrt" | "sin" | "cos" | "tan" | "exp" | "log" => {
-            (f64_type, vec![f64_type])
-        }
-        "pow" | "fmod" | "copysign" => (f64_type, vec![f64_type, f64_type]),
-        "fma" => (f64_type, vec![f64_type, f64_type, f64_type]),
-        "ldexp" => (f64_type, vec![f64_type, i32_type]),
-        "memcmp" | "bcmp" => (i32_type, vec![pointer, pointer, i64_type]),
-        _ => return None,
-    };
+    let (result, parameters) = compiler_runtime_signature(rust_name)?;
+    let result = result.llvm_type(context);
+    let mut parameters: Vec<_> = parameters
+        .iter()
+        .map(|parameter| parameter.llvm_type(context))
+        .collect();
     let function = LLVMFunctionType(result, parameters.as_mut_ptr(), parameters.len() as u32, 0);
     Some(LLVMAddFunction(module, name, function))
 }
 
-unsafe fn emit_object(module: LLVMModuleRef, path: &Path) -> Result<(), String> {
-    if LLVM_InitializeNativeTarget() != 0 || LLVM_InitializeNativeAsmPrinter() != 0 {
-        return Err("LLVM native target initialization failed".into());
+#[derive(Clone, Copy)]
+enum AbiType {
+    Pointer,
+    I32,
+    I64,
+    F64,
+}
+
+impl AbiType {
+    unsafe fn llvm_type(self, context: LLVMContextRef) -> LLVMTypeRef {
+        match self {
+            Self::Pointer => LLVMPointerTypeInContext(context, 0),
+            Self::I32 => LLVMInt32TypeInContext(context),
+            Self::I64 => LLVMInt64TypeInContext(context),
+            Self::F64 => LLVMDoubleTypeInContext(context),
+        }
     }
-    let triple = LLVMGetTarget(module);
-    let mut target = ptr::null_mut();
-    let mut message = ptr::null_mut();
-    if LLVMGetTargetFromTriple(triple, &mut target, &mut message) != 0 {
-        return Err(take_message(message));
-    }
-    let empty = CString::new("").unwrap();
-    let machine = LLVMCreateTargetMachine(
-        target,
-        triple,
-        empty.as_ptr(),
-        empty.as_ptr(),
-        LLVMCodeGenOptLevel::LLVMCodeGenLevelNone,
-        LLVMRelocMode::LLVMRelocPIC,
-        LLVMCodeModel::LLVMCodeModelDefault,
-    );
-    if machine.is_null() {
-        return Err("LLVMCreateTargetMachine failed".into());
-    }
-    let filename = path_cstring(path)?;
-    let failed = LLVMTargetMachineEmitToFile(
-        machine,
-        module,
-        filename.as_ptr().cast_mut(),
-        LLVMCodeGenFileType::LLVMObjectFile,
-        &mut message,
-    );
-    LLVMDisposeTargetMachine(machine);
-    if failed != 0 {
-        return Err(take_message(message));
-    }
-    Ok(())
+}
+
+fn compiler_runtime_signature(name: &str) -> Option<(AbiType, &'static [AbiType])> {
+    use AbiType::{F64, I32, I64, Pointer};
+
+    let signature: (AbiType, &'static [AbiType]) = match name {
+        "memcpy" | "memmove" => (Pointer, &[Pointer, Pointer, I64]),
+        "memset" => (Pointer, &[Pointer, I32, I64]),
+        "__powidf2" => (F64, &[F64, I32]),
+        "floor" | "ceil" | "trunc" | "round" | "sqrt" | "sin" | "cos" | "tan" | "exp" | "log" => {
+            (F64, &[F64])
+        }
+        "pow" | "fmod" | "copysign" => (F64, &[F64, F64]),
+        "fma" => (F64, &[F64, F64, F64]),
+        "ldexp" => (F64, &[F64, I32]),
+        "memcmp" | "bcmp" => (I32, &[Pointer, Pointer, I64]),
+        _ => return None,
+    };
+    Some(signature)
 }
 
 fn path_cstring(path: &Path) -> Result<CString, String> {
@@ -205,18 +194,29 @@ unsafe fn take_message(message: *mut i8) -> String {
     text
 }
 
+#[allow(dead_code)]
 pub(super) struct ModuleSymbols {
     definitions: BTreeSet<String>,
+    linkable_definitions: BTreeSet<String>,
     declarations: BTreeSet<String>,
 }
 
+#[allow(dead_code)]
 impl ModuleSymbols {
     pub(super) fn is_definition(&self, name: &str) -> bool {
         self.definitions.contains(name)
     }
 
+    pub(super) fn is_linkable_definition(&self, name: &str) -> bool {
+        self.linkable_definitions.contains(name)
+    }
+
     pub(super) fn is_declaration(&self, name: &str) -> bool {
-        self.declarations.contains(name) || is_compiler_runtime(name)
+        self.declarations.contains(name)
+    }
+
+    pub(super) fn is_external_abi(&self, name: &str) -> bool {
+        compiler_runtime_signature(name).is_some()
     }
 }
 
@@ -249,20 +249,32 @@ unsafe fn module_symbols_in_context(
         return Err(take_message(message));
     }
     let mut definitions = BTreeSet::new();
+    let mut linkable_definitions = BTreeSet::new();
     let mut declarations = BTreeSet::new();
     let mut function = LLVMGetFirstFunction(module);
     while !function.is_null() {
-        insert_symbol(function, &mut definitions, &mut declarations);
+        insert_symbol(
+            function,
+            &mut definitions,
+            &mut linkable_definitions,
+            &mut declarations,
+        );
         function = LLVMGetNextFunction(function);
     }
     let mut global = LLVMGetFirstGlobal(module);
     while !global.is_null() {
-        insert_symbol(global, &mut definitions, &mut declarations);
+        insert_symbol(
+            global,
+            &mut definitions,
+            &mut linkable_definitions,
+            &mut declarations,
+        );
         global = LLVMGetNextGlobal(global);
     }
     LLVMDisposeModule(module);
     Ok(ModuleSymbols {
         definitions,
+        linkable_definitions,
         declarations,
     })
 }
@@ -270,6 +282,7 @@ unsafe fn module_symbols_in_context(
 unsafe fn insert_symbol(
     value: LLVMValueRef,
     definitions: &mut BTreeSet<String>,
+    linkable_definitions: &mut BTreeSet<String>,
     declarations: &mut BTreeSet<String>,
 ) {
     let mut length = 0usize;
@@ -282,33 +295,17 @@ unsafe fn insert_symbol(
     if LLVMIsDeclaration(value) != 0 {
         declarations.insert(name);
     } else {
+        let linkage = LLVMGetLinkage(value);
+        if matches!(
+            linkage,
+            LLVMLinkage::LLVMExternalLinkage
+                | LLVMLinkage::LLVMLinkOnceAnyLinkage
+                | LLVMLinkage::LLVMLinkOnceODRLinkage
+                | LLVMLinkage::LLVMWeakAnyLinkage
+                | LLVMLinkage::LLVMWeakODRLinkage
+        ) {
+            linkable_definitions.insert(name.clone());
+        }
         definitions.insert(name);
     }
-}
-
-fn is_compiler_runtime(name: &str) -> bool {
-    matches!(
-        name,
-        "memcpy"
-            | "memmove"
-            | "memset"
-            | "__powidf2"
-            | "floor"
-            | "ceil"
-            | "trunc"
-            | "round"
-            | "sqrt"
-            | "sin"
-            | "cos"
-            | "tan"
-            | "exp"
-            | "log"
-            | "pow"
-            | "fmod"
-            | "copysign"
-            | "fma"
-            | "ldexp"
-            | "memcmp"
-            | "bcmp"
-    )
 }
