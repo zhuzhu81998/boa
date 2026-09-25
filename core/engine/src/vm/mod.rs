@@ -990,6 +990,8 @@ impl Context {
         let mut jit_cache = crate::jit::JitCache::default();
         #[cfg(boa_jit_stencils)]
         let mut jit_diagnostics = crate::jit::RunDiagnostics::new();
+        #[cfg(boa_jit_stencils)]
+        let jit_enabled = std::env::var_os("BOA_JIT_DISABLE").is_none();
 
         while let Some(byte) = self
             .vm
@@ -1004,7 +1006,7 @@ impl Context {
             #[cfg(boa_jit_stencils)]
             let jit_entry = {
                 let frame = self.vm.frame();
-                let enabled = !cfg!(feature = "fuzz");
+                let enabled = jit_enabled && !cfg!(feature = "fuzz");
                 #[cfg(feature = "trace")]
                 let enabled = enabled && !self.vm.trace && !frame.code_block.traceable();
                 if enabled {

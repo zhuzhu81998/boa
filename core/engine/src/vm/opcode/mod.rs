@@ -48,6 +48,29 @@ pub(crate) struct JitChain {
     pub(crate) frame_transfers: *mut u64,
 }
 
+// Constants are only consumed by extracted templates, never by interpreter handlers.
+#[cfg(feature = "jit")]
+#[unsafe(no_mangle)]
+#[inline(never)]
+fn boa_jit_constant(slot: u32) -> u64 {
+    std::hint::black_box(u64::from(slot))
+}
+
+/// Template marker lowered to a direct musttail call to the successor patch hole.
+#[cfg(feature = "jit")]
+#[unsafe(no_mangle)]
+#[inline(never)]
+unsafe extern "C" fn boa_jit_next(
+    context: *mut Context,
+    pc: usize,
+    chain: *const JitChain,
+    output: *mut ControlFlow<CompletionRecord>,
+) {
+    // Keep all arguments live in the template IR; this body is never copied.
+    std::hint::black_box((context, pc, chain));
+    unsafe { output.write(ControlFlow::Continue(())) };
+}
+
 // This marker has an ordinary implementation for the AOT module. Stencil lowering replaces
 // calls to it with an indirect LLVM musttail call using the uniform handler ABI.
 #[cfg(feature = "jit")]
@@ -70,6 +93,7 @@ unsafe fn finish_jit_handler(
     chain: *const JitChain,
     output: *mut ControlFlow<CompletionRecord>,
     result: ControlFlow<CompletionRecord>,
+    next_pc: usize,
 ) {
     if matches!(result, ControlFlow::Continue(())) {
         // Continue owns no resources. Consume it before the tail transfer so rustc cannot
@@ -88,6 +112,12 @@ unsafe fn finish_jit_handler(
         let block = std::ptr::from_ref(&*frame.code_block);
         let mut active = state.active.get();
         let changed_block = block != active.code_block;
+        if !changed_block && vm.frames.len() == state.frame_depth.get() && pc == next_pc {
+            let successor = boa_jit_constant(6) as usize;
+            if successor != 0 {
+                return unsafe { boa_jit_next(context, pc, chain, output) };
+            }
+        }
         if changed_block {
             // Inlined lookup over an immutable, address-sorted snapshot. No runtime helper
             // call or compilation occurs on the native call/return path.
@@ -498,6 +528,23 @@ macro_rules! generate_opcodes {
         }
 
         impl Opcode {
+            #[cfg(feature = "jit")]
+            #[allow(unused_parens, dead_code)] // Also emitted in the template-only build.
+            pub(crate) fn jit_constants(self, bytes: &[u8], pc: usize) -> Vec<u64> {
+                let mut values = Vec::with_capacity(7);
+                let next_pc = match self {
+                    $(Self::$Variant => {
+                        let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+                        args.jit_collect(&mut values);
+                        next_pc
+                    }),*
+                };
+                assert!(values.len() <= 5);
+                values.resize(5, 0);
+                values.push(next_pc as u64);
+                values
+            }
+
             pub(crate) fn as_str(&self) -> &'static str {
                 match self {
                     $(Self::$Variant => $Variant::NAME),*
@@ -560,15 +607,16 @@ macro_rules! generate_opcodes {
                     if !counter.is_null() {
                         unsafe { *counter = (*counter).saturating_add(1) };
                     }
+                    let next_pc = boa_jit_constant(5) as usize;
                     let result = {
                         let context = unsafe { &mut *context };
                         let bytes = &context.vm.frame().code_block.bytecode.bytes;
-                        let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+                        let (args, _) = <($($($FieldType),*)?)>::jit_decode(bytes, pc + 1, &mut 0);
                         context.vm.frame_mut().pc = next_pc as u32;
                         let result = $Variant::operation(args, context);
                         IntoCompletionRecord::into_completion_record(result, context)
                     };
-                    unsafe { finish_jit_handler(context, chain, output, result) };
+                    unsafe { finish_jit_handler(context, chain, output, result, next_pc) };
                 }
 
                 #[cfg_attr(feature = "jit", unsafe(no_mangle))]

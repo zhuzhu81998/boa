@@ -26,13 +26,35 @@ fn bitcode(bytes: &[u8]) -> bool {
 }
 
 fn run(mut args: Vec<OsString>) -> Result<u8, String> {
+    // Prepare Cargo's engine archive before rustc merges/optimizes it for fat LTO.
+    // Reuse the same typed resolver injection as the ordinary pre-link path.
+    let prepare = if args.first().is_some_and(|arg| arg == "--prepare-runtime") {
+        if args.len() != 3 {
+            return Err("usage: --prepare-runtime ENGINE.rlib RESOLVER_DIRECTORY".into());
+        }
+        let archive = args[1].clone();
+        let directory = args[2].clone();
+        args = vec![
+            archive.clone(),
+            "-L".into(),
+            directory,
+            "-lboa_jit_resolver".into(),
+        ];
+        Some(archive)
+    } else {
+        None
+    };
     // rustc's ordinary Unix linker arguments are direct arguments, not shell commands.
     // Fail explicitly for JIT response-file links until their driver-specific syntax is supported.
     let jit = args.iter().any(|arg| arg == "-lboa_jit_resolver");
     let linker =
         env::var_os("BOA_JIT_REAL_LINKER").unwrap_or_else(|| "/usr/lib/llvm-22/bin/clang".into());
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
-    if jit {
+    if jit && prepare.is_none() && env::var_os("BOA_JIT_RESOLVER_PREPARED").is_some() {
+        // The compiler wrapper already injected the table into the engine archive. A missing
+        // definition still produces an ordinary native linker error; never create a stub table.
+        args.retain(|arg| arg != "-lboa_jit_resolver");
+    } else if jit {
         if args
             .iter()
             .any(|arg| arg.to_string_lossy().starts_with('@'))
@@ -138,6 +160,11 @@ fn run(mut args: Vec<OsString>) -> Result<u8, String> {
         }
         args.retain(|arg| arg != "-lboa_jit_resolver");
         eprintln!("boa-jit-linker: inserted address table into runtime bitcode");
+    }
+    if let Some(archive) = prepare {
+        // Only a compiler-owned output is replaced, after successful validation/repacking.
+        fs::copy(&args[0], archive).map_err(|e| format!("cannot install prepared archive: {e}"))?;
+        return Ok(0);
     }
     let status = Command::new(linker)
         .args(args)

@@ -7,14 +7,39 @@ For the existing Boa CLI, use the automated build-and-run driver from the reposi
 ```
 
 It builds the linker wrapper, captures template IR using the CLI's actual dependency features,
-and rebuilds the CLI with the JIT. Unchanged builds are reused. The experimental driver disables
-optional CLI default features (such as bundled internationalization and alternative allocators).
+and rebuilds the CLI with the JIT. Unchanged builds are reused. Both build passes enable normal
+CLI default features, including the fast allocator (jemalloc on x86_64 GNU/Linux), bundled
+internationalization, and fetch support.
+The driver inherits the normal release optimization level, fat LTO, codegen units, and symbol
+stripping. After compiling the engine, its compiler wrapper inserts the runtime address table
+into the engine archive, before rustc's CLI fat-LTO pass can remove private helpers. The final
+link reuses that prepared table. Named struct declarations may resolve to Rust's byte-array
+storage definitions only with matching size, sufficient alignment, and matching address space;
+TLS and unrelated type mismatches remain rejected. Function signatures remain strictly checked.
+The driver does not enable `link-dead-code`. The remaining JIT-specific settings
+are linker-plugin bitcode/the linker wrapper and `panic=abort`: unwinding through generated
+frames is not supported yet. Thus these builds are comparable, but not compiler-flag-identical
+to the ordinary CLI.
 LLVM 22 must be installed. The driver uses Git to enumerate build inputs; ripgrep is not required.
 For build-only use `./tools/jit-run.sh --build-only`.
 The resulting executable is `target/jit-cli/release/boa`; do not confuse it with an older
 interpreter-only `target/release/boa`. Set `BOA_JIT_TRACE=1` to see native-chain entries.
 
+Compare both execution modes with the same executable (build before timing):
+
+```sh
+./tools/jit-run.sh --build-only
+time taskset -c 1 target/jit-cli/release/boa navier-stokes.js
+time BOA_JIT_DISABLE=1 taskset -c 1 target/jit-cli/release/boa navier-stokes.js
+```
+
+`BOA_JIT_DISABLE` disables JIT execution when present, including when set to `0`.
+Unset `BOA_JIT_TRACE` for timings. Both paths now share allocator, features, and build flags;
+the interpreter path is not necessarily identical to a separately built default CLI.
+
 The lower-level build steps below are for embedding and pipeline development.
+They use late resolver insertion with rustc-side LTO disabled. Use the automated driver above
+for fat LTO; it additionally prepares the engine archive before compiling the CLI.
 
 LLVM 22 development libraries and tools are required. The template and final engine must use the
 same checkout, Rust toolchain, target, features, panic mode, optimization level, and codegen
@@ -37,13 +62,13 @@ CARGO_TARGET_DIR=/tmp/boa-jit-template-plugin-ir \
 LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 \
 BOA_JIT_BUILD_TEMPLATE=1 \
 CARGO_PROFILE_RELEASE_LTO=off \
-RUSTFLAGS="-Cpanic=abort -Clink-dead-code -Clinker-plugin-lto" \
+RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto" \
   cargo rustc --release -p boa_engine --features jit --lib --crate-type rlib -- \
   --emit=llvm-ir=/tmp/boa-jit-template.ll -Ccodegen-units=1
 ```
 
-Build or run Boa with linker-plugin LTO. The release profiles rustc-side fat LTO is disabled here
-because LTO is instead performed by LLVM's native linker plugin. The pre-link wrapper inserts
+Build or run Boa with linker-plugin LTO. Disable rustc-side fat LTO so
+linker-plugin mode leaves unmerged bitcode for LLVM's native linker. The pre-link wrapper inserts
 the helper address table into the runtime module before that link. Replace the wrapper path below
 with the absolute path to your checkout.
 
@@ -52,8 +77,9 @@ CARGO_TARGET_DIR=/tmp/boa-jit-runtime \
 LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 \
 BOA_JIT_TEMPLATE_LLVM_IR=/tmp/boa-jit-template.ll \
 CARGO_PROFILE_RELEASE_LTO=off \
-RUSTFLAGS="-Cpanic=abort -Clink-dead-code -Clinker-plugin-lto \
-  -Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker -Clink-arg=-fuse-ld=lld" \
+RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto \
+  -Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker -Clink-arg=-fuse-ld=lld \
+  -Clink-arg=-Wl,--lto-O3" \
   cargo rustc --release -p boa_engine --features jit --lib --crate-type rlib
 ```
 
@@ -86,9 +112,14 @@ have separate caches.
 
 Handlers use a uniform C ABI carrying the context, bytecode PC, chain state, and an
 output slot. LLVM replaces the explicit continuation marker with `musttail`; a nontrivial cleanup
-after that marker is rejected, never silently dropped. Within a frame, the next PC selects an
-entry from the compiled-bytecode address table and transfers directly to it without the Rust
-opcode-dispatch loop. This is still an indirect native jump, not direct fallthrough stitching.
+after that marker is rejected, never silently dropped. Fixed-size operands and the next PC are
+patched into native immediates, rather than decoded on each execution. Variable-length operands
+retain their bytecode decoder. Scalar holes preserve integer and floating-point bit patterns.
+Each instruction owns its native jump-table/constant bundle, including relocations back into
+its specialized handler; these cannot share another instruction's patched operands.
+If the frame is unchanged and execution continues at the ordinary successor PC, a patched direct
+tail jump avoids the native address-table lookup. Other transfers still use the address table;
+this is not fallthrough stitching. Missing successors use the existing driver fallback.
 On frame changes, handlers select the next code block from an immutable, sorted snapshot of the
 cache and tail-transfer to its entry. The active block and frame depth are updated in the chain
 state. Cache misses, missing entries, and final completions return to the driver. Boa's existing

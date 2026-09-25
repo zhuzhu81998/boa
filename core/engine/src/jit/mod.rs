@@ -118,6 +118,9 @@ pub(super) enum RelocationKind {
 pub(super) enum RelocationTarget {
     Internal(usize),
     External(usize),
+    Constant(usize),
+    Value(u64),
+    Bytecode(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +166,7 @@ struct PendingRelocation {
 pub(super) struct FunctionBuilder {
     code: Vec<u8>,
     relocations: Vec<PendingRelocation>,
+    constants: Vec<u64>,
 }
 
 impl FunctionBuilder {
@@ -170,8 +174,9 @@ impl FunctionBuilder {
         let mut builder = Self {
             code: Vec::new(),
             relocations: Vec::new(),
+            constants: Vec::new(),
         };
-        let closure = builder.append_stencil(INTERNAL_CLOSURE_BLOB, INTERNAL_CLOSURE_RELOCS)?;
+        let closure = builder.append_stencil(INTERNAL_CLOSURE_BLOB, INTERNAL_CLOSURE_RELOCS, 16)?;
         debug_assert_eq!(closure, 0);
         Ok(builder)
     }
@@ -180,8 +185,10 @@ impl FunctionBuilder {
         &mut self,
         stencil: &[u8],
         relocations: &[StencilRelocation],
+        alignment: usize,
     ) -> Result<usize, JitError> {
-        self.code.resize(self.code.len().next_multiple_of(16), 0x90);
+        self.code
+            .resize(self.code.len().next_multiple_of(alignment), 0x90);
         let entry = self.code.len();
         self.code.extend_from_slice(stencil);
         for relocation in relocations {
@@ -203,13 +210,35 @@ impl FunctionBuilder {
                 addend: relocation.addend,
                 size: relocation.size,
                 kind: relocation.kind,
-                target: relocation.target,
+                target: match relocation.target {
+                    RelocationTarget::Internal(offset) => {
+                        RelocationTarget::Internal(entry + offset)
+                    }
+                    RelocationTarget::Constant(slot) => {
+                        assert!(
+                            (matches!(relocation.kind, RelocationKind::Absolute)
+                                && relocation.size == 64)
+                                || (slot == 6
+                                    && matches!(
+                                        relocation.kind,
+                                        RelocationKind::PltRelative | RelocationKind::Relative
+                                    )
+                                    && relocation.size == 32)
+                        );
+                        if slot == 6 {
+                            RelocationTarget::Bytecode(self.constants[5] as usize)
+                        } else {
+                            RelocationTarget::Value(self.constants[slot])
+                        }
+                    }
+                    target => target,
+                },
             });
         }
         Ok(entry)
     }
 
-    fn finish(mut self) -> Result<ExecutableMemory, JitError> {
+    fn finish(mut self, entries: &[usize]) -> Result<ExecutableMemory, JitError> {
         let relocations = std::mem::take(&mut self.relocations);
         let mut resolved = Vec::with_capacity(relocations.len());
         let mut direct_calls = Vec::new();
@@ -217,6 +246,12 @@ impl FunctionBuilder {
             let target = match relocation.target {
                 RelocationTarget::External(index) => Target::Absolute(external_address(index)?),
                 RelocationTarget::Internal(offset) => Target::Offset(offset),
+                RelocationTarget::Value(value) => Target::Absolute(value as usize),
+                RelocationTarget::Bytecode(pc) => match entries.get(pc).copied() {
+                    Some(offset) if offset != usize::MAX => Target::Offset(offset),
+                    _ => Target::Absolute(0),
+                },
+                RelocationTarget::Constant(_) => unreachable!("unbound constant"),
             };
             let patch_target = match relocation.kind {
                 RelocationKind::PltRelative if matches!(target, Target::Absolute(_)) => {
@@ -363,13 +398,14 @@ impl JitCode {
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
             if let Some(emitter) = EMITTERS[opcode as usize] {
+                builder.constants = opcode.jit_constants(&bytecode.bytes, pc);
                 entries[pc] = emitter(&mut builder)?;
             }
         }
         if entries.iter().all(|&entry| entry == usize::MAX) {
             return Ok(None);
         }
-        let memory = builder.finish()?;
+        let memory = builder.finish(&entries)?;
         for entry in &mut entries {
             *entry = if *entry == usize::MAX {
                 0

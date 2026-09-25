@@ -72,6 +72,36 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
     /// Decode the argument from a byte slice
     /// Returns the decoded argument and the new position after reading
     fn decode(bytes: &[u8], pos: usize) -> (Self, usize);
+
+    /// Template-only decoding; variable-sized operands retain their normal decoder.
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    fn jit_decode(bytes: &[u8], pos: usize, slot: &mut u32) -> (Self, usize) {
+        *slot += 1;
+        Self::decode(bytes, pos)
+    }
+
+    #[cfg(feature = "jit")]
+    #[allow(dead_code)] // Used only by the final runtime, not the template-only build.
+    fn jit_collect(&self, values: &mut Vec<u64>) {
+        values.push(0);
+    }
+}
+
+macro_rules! jit_scalar {
+    ($size:expr, $from:expr, $to:expr) => {
+        #[cfg(feature = "jit")]
+        #[inline(always)]
+        fn jit_decode(_: &[u8], pos: usize, slot: &mut u32) -> (Self, usize) {
+            let value = super::boa_jit_constant(*slot);
+            *slot += 1;
+            (($from)(value), pos + $size)
+        }
+        #[cfg(feature = "jit")]
+        fn jit_collect(&self, values: &mut Vec<u64>) {
+            values.push(($to)(*self));
+        }
+    };
 }
 
 #[inline(always)]
@@ -139,6 +169,8 @@ impl<T: Argument> Argument for ThinVec<T> {
 }
 
 impl Argument for () {
+    #[cfg(feature = "jit")]
+    fn jit_collect(&self, _: &mut Vec<u64>) {}
     fn encode(self, _: &mut Vec<u8>) {}
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
@@ -147,6 +179,7 @@ impl Argument for () {
 }
 
 impl Argument for IndexOperand {
+    jit_scalar!(4, |v| Self(v as u32), |v: Self| u64::from(v.0));
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.0);
     }
@@ -158,6 +191,7 @@ impl Argument for IndexOperand {
 }
 
 impl Argument for RegisterOperand {
+    jit_scalar!(4, |v| Self::new(v as u32), |v: Self| u64::from(v.0));
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.0);
     }
@@ -169,6 +203,7 @@ impl Argument for RegisterOperand {
 }
 
 impl Argument for Address {
+    jit_scalar!(4, |v| Self::new(v as u32), |v: Self| u64::from(v.0));
     #[inline(always)]
     fn encode(self, bytes: &mut Vec<u8>) {
         write_u32(bytes, self.0);
@@ -184,6 +219,18 @@ impl Argument for Address {
 macro_rules! impl_argument_for_tuple {
     ($( $i: ident  $t: ident ),*) => {
         impl<$( $t: Argument, )*> Argument for ($( $t, )*) {
+            #[cfg(feature = "jit")]
+            #[inline(always)]
+            fn jit_decode(bytes: &[u8], pos: usize, slot: &mut u32) -> (Self, usize) {
+                $( let ($i, pos) = $t::jit_decode(bytes, pos, slot); )*
+                (($($i,)*), pos)
+            }
+
+            #[cfg(feature = "jit")]
+            fn jit_collect(&self, values: &mut Vec<u64>) {
+                let ($($i,)*) = self;
+                $($i.jit_collect(values);)*
+            }
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 let ($($i, )*) = self;
@@ -209,6 +256,14 @@ macro_rules! impl_argument_for_int {
     ($( $t: ty )*) => {
         $(
         impl Argument for $t {
+            jit_scalar!(size_of::<Self>(), |v: u64| {
+                let bytes = v.to_le_bytes();
+                Self::from_le_bytes(bytes[..size_of::<Self>()].try_into().unwrap())
+            }, |v: Self| {
+                let mut bytes = [0; 8];
+                bytes[..size_of::<Self>()].copy_from_slice(&v.to_le_bytes());
+                u64::from_le_bytes(bytes)
+            });
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {
                 pastey::paste! {

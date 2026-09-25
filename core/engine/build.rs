@@ -24,7 +24,7 @@ fn jit_config() -> (u64, String) {
     let mut entries: Vec<String> = env::vars()
         .filter_map(|(name, _)| name.strip_prefix("CARGO_FEATURE_").map(str::to_owned))
         .collect();
-    entries.push("JIT_ABI=chain-v3".into());
+    entries.push("JIT_ABI=chain-v4-specialized".into());
     for name in [
         "CARGO_CFG_TARGET_ARCH",
         "CARGO_CFG_TARGET_OS",

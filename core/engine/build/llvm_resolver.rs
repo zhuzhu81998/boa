@@ -121,6 +121,7 @@ unsafe fn generate_in_context(
             continue;
         }
         let declaration = LLVMAddGlobal(resolver, LLVMGlobalGetValueType(value), name.as_ptr());
+        LLVMSetAlignment(declaration, LLVMGetAlignment(value));
         LLVMReplaceAllUsesWith(value, declaration);
         if LLVMIsGlobalConstant(value) != 0
             && LLVMIsDeclaration(value) == 0
