@@ -170,15 +170,12 @@ pub(super) struct FunctionBuilder {
 }
 
 impl FunctionBuilder {
-    fn new() -> Result<Self, JitError> {
-        let mut builder = Self {
+    fn new() -> Self {
+        Self {
             code: Vec::new(),
             relocations: Vec::new(),
             constants: Vec::new(),
-        };
-        let closure = builder.append_stencil(INTERNAL_CLOSURE_BLOB, INTERNAL_CLOSURE_RELOCS, 16)?;
-        debug_assert_eq!(closure, 0);
-        Ok(builder)
+        }
     }
 
     pub(super) fn append_stencil(
@@ -346,8 +343,6 @@ fn write_relocation(code: &mut [u8], offset: usize, size: u8, value: i128) -> Re
 }
 
 static STENCIL_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/jit_stencils.bin"));
-static INTERNAL_CLOSURE_BLOB: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/jit_internal_closure.bin"));
 include!(concat!(env!("OUT_DIR"), "/jit_stencils_generated.rs"));
 
 const _: [(); 256] = [(); OPCODE_HANDLERS.len()];
@@ -394,7 +389,7 @@ impl JitCode {
     }
 
     fn try_compile(bytecode: &Bytecode) -> Result<Option<Self>, JitError> {
-        let mut builder = FunctionBuilder::new()?;
+        let mut builder = FunctionBuilder::new();
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
             if let Some(emitter) = EMITTERS[opcode as usize] {

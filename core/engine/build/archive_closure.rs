@@ -709,7 +709,6 @@ fn emit_metadata(
         "unsafe extern \"C\" {{ static BOA_JIT_EXTERNAL_SYMBOLS: [usize; {}]; }}\n\n",
         external.len()
     ));
-    generated.push_str("static INTERNAL_CLOSURE_RELOCS: &[StencilRelocation] = &[];\n\n");
     for (opcode, stencil) in stencils.iter().enumerate() {
         if !supported.contains(&opcode) {
             generated.push_str(&format!(
@@ -819,6 +818,5 @@ fn emit_metadata(
     }
     generated.push_str("];\n");
     fs::write(out.join("jit_stencils.bin"), stencil_blob).map_err(|e| e.to_string())?;
-    fs::write(out.join("jit_internal_closure.bin"), []).map_err(|e| e.to_string())?;
     fs::write(out.join("jit_stencils_generated.rs"), generated).map_err(|e| e.to_string())
 }

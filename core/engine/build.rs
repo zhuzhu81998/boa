@@ -102,7 +102,6 @@ fn main() {
     let generation_key = format!("{generation_key:016x}");
     let reusable = [
         "jit_stencils.bin",
-        "jit_internal_closure.bin",
         "jit_stencils_generated.rs",
         "libboa_jit_resolver.a",
     ]
