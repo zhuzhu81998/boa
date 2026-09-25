@@ -21,6 +21,40 @@ pub(super) fn generate(ir: &Path, names: &[String], out: &Path) -> Result<PathBu
     unsafe { generate_inner(ir, names, out) }
 }
 
+/// Lowers the canonical LLVM module into the native archive used for stencil extraction.
+///
+/// The resolver is generated from this same module, so private Rust symbol names never have to be
+/// matched across two independent rustc compilations.
+pub(super) fn emit_template_archive(ir: &Path, out: &Path) -> Result<PathBuf, String> {
+    let object = out.join("boa_jit_template.o");
+    let llc = std::env::var_os("LLVM_LLC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-22/bin/llc"));
+    let output = Command::new(&llc)
+        .arg("--filetype=obj")
+        .arg("--relocation-model=pic")
+        .arg("--function-sections")
+        .arg("--data-sections")
+        .arg("--x86-relax-relocations=false")
+        .arg("-O=3")
+        .arg("-o")
+        .arg(&object)
+        .arg(ir)
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", llc.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed: {}",
+            llc.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let archive = out.join("libboa_jit_template.a");
+    archive_object(&object, &archive)?;
+    Ok(archive)
+}
+
 unsafe fn generate_inner(ir: &Path, names: &[String], out: &Path) -> Result<PathBuf, String> {
     let context = LLVMContextCreate();
     if context.is_null() {
@@ -55,26 +89,68 @@ unsafe fn generate_in_context(
     LLVMSetTarget(resolver, LLVMGetTarget(original));
     LLVMSetDataLayout(resolver, LLVMGetDataLayoutStr(original));
 
+    // Carry anonymous constant initializers as identity-independent descriptions. Rust's alloc_*
+    // labels can change even when function symbols match. The hook compares these LLVM constants
+    // to runtime-owned constants; it never guesses a private function name or copies its body.
+    let mut functions = Vec::new();
+    let mut value = LLVMGetFirstFunction(original);
+    while !value.is_null() {
+        functions.push(value);
+        value = LLVMGetNextFunction(value);
+    }
+    for value in functions {
+        let mut length = 0;
+        let name = LLVMGetValueName2(value, &mut length);
+        let name = CString::new(std::slice::from_raw_parts(name.cast::<u8>(), length)).unwrap();
+        let declaration = LLVMAddFunction(resolver, name.as_ptr(), LLVMGlobalGetValueType(value));
+        LLVMSetFunctionCallConv(declaration, LLVMGetFunctionCallConv(value));
+        LLVMReplaceAllUsesWith(value, declaration);
+    }
+    let mut globals = Vec::new();
+    let mut value = LLVMGetFirstGlobal(original);
+    while !value.is_null() {
+        globals.push(value);
+        value = LLVMGetNextGlobal(value);
+    }
+    let mut constants = Vec::new();
+    for value in globals {
+        let mut length = 0;
+        let name = LLVMGetValueName2(value, &mut length);
+        let name = CString::new(std::slice::from_raw_parts(name.cast::<u8>(), length)).unwrap();
+        if name.as_bytes() == TABLE_NAME.as_bytes() {
+            continue;
+        }
+        let declaration = LLVMAddGlobal(resolver, LLVMGlobalGetValueType(value), name.as_ptr());
+        LLVMReplaceAllUsesWith(value, declaration);
+        if LLVMIsGlobalConstant(value) != 0
+            && LLVMIsDeclaration(value) == 0
+            && LLVMGetUnnamedAddress(value) != llvm_sys::LLVMUnnamedAddr::LLVMNoUnnamedAddr
+        {
+            constants.push((value, declaration));
+        }
+    }
+    for (source, declaration) in constants {
+        LLVMSetInitializer(declaration, LLVMGetInitializer(source));
+        LLVMSetGlobalConstant(declaration, 1);
+        LLVMSetUnnamedAddress(declaration, LLVMGetUnnamedAddress(source));
+        LLVMSetLinkage(declaration, LLVMLinkage::LLVMPrivateLinkage);
+    }
+
     let pointer_type = LLVMPointerTypeInContext(context, 0);
     let mut entries = Vec::<LLVMValueRef>::with_capacity(names.len());
     for name in names {
         let c_name = CString::new(name.as_str())
             .map_err(|_| format!("external symbol contains NUL: {name:?}"))?;
-        let source_function = LLVMGetNamedFunction(original, c_name.as_ptr());
+        let source_function = LLVMGetNamedFunction(resolver, c_name.as_ptr());
         let declaration = if !source_function.is_null() {
-            LLVMAddFunction(
-                resolver,
-                c_name.as_ptr(),
-                LLVMGlobalGetValueType(source_function),
-            )
+            source_function
         } else {
-            let source_global = LLVMGetNamedGlobal(original, c_name.as_ptr());
+            let source_global = LLVMGetNamedGlobal(resolver, c_name.as_ptr());
             if !source_global.is_null() {
-                LLVMAddGlobal(
-                    resolver,
-                    LLVMGlobalGetValueType(source_global),
-                    c_name.as_ptr(),
-                )
+                source_global
+            } else if name.starts_with("BOA_JIT_TLS_ADDR_") {
+                let ty = LLVMFunctionType(pointer_type, ptr::null_mut(), 0, 0);
+                LLVMAddFunction(resolver, c_name.as_ptr(), ty)
             } else if let Some(runtime) =
                 add_compiler_runtime(context, resolver, name, c_name.as_ptr())
             {
@@ -111,19 +187,24 @@ unsafe fn generate_in_context(
     LLVMDisposeModule(original);
 
     let archive = out.join("libboa_jit_resolver.a");
+    archive_object(&object, &archive)?;
+    Ok(archive)
+}
+
+fn archive_object(object: &Path, archive: &Path) -> Result<(), String> {
     let ar = std::env::var_os("LLVM_AR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-22/bin/llvm-ar"));
     let status = Command::new(&ar)
         .arg("crs")
-        .arg(&archive)
-        .arg(&object)
+        .arg(archive)
+        .arg(object)
         .status()
         .map_err(|e| format!("could not run {}: {e}", ar.display()))?;
     if !status.success() {
         return Err(format!("{} failed with {status}", ar.display()));
     }
-    Ok(archive)
+    Ok(())
 }
 
 unsafe fn add_compiler_runtime(

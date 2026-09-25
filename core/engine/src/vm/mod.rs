@@ -987,7 +987,9 @@ impl Context {
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
         #[cfg(boa_jit_stencils)]
-        let mut jit_code: Option<(*const u8, usize, crate::jit::JitCode)> = None;
+        let mut jit_cache = crate::jit::JitCache::default();
+        #[cfg(boa_jit_stencils)]
+        let mut jit_diagnostics = crate::jit::RunDiagnostics::new();
 
         while let Some(byte) = self
             .vm
@@ -1001,18 +1003,15 @@ impl Context {
 
             #[cfg(boa_jit_stencils)]
             let jit_entry = {
-                let bytecode = &self.vm.frame().code_block.bytecode;
-                let identity = (bytecode.bytes.as_ptr(), bytecode.bytes.len());
-                let stale = jit_code
-                    .as_ref()
-                    .is_none_or(|(pointer, length, _)| (*pointer, *length) != identity);
-                if stale {
-                    jit_code = crate::jit::JitCode::compile(bytecode)
-                        .map(|code| (identity.0, identity.1, code));
+                let frame = self.vm.frame();
+                let enabled = !cfg!(feature = "fuzz");
+                #[cfg(feature = "trace")]
+                let enabled = enabled && !self.vm.trace && !frame.code_block.traceable();
+                if enabled {
+                    jit_cache.entry(&frame.code_block, frame.pc as usize, self.vm.frames.len())
+                } else {
+                    None
                 }
-                jit_code
-                    .as_ref()
-                    .and_then(|(_, _, code)| code.entry(self.vm.frame().pc as usize))
             };
 
             match self.execute_one(
@@ -1022,9 +1021,11 @@ impl Context {
 
                     #[cfg(boa_jit_stencils)]
                     if let Some(entry) = jit_entry {
-                        return crate::jit::execute(entry, context, pc);
+                        return crate::jit::execute(entry, context, pc, &mut jit_diagnostics);
                     }
 
+                    #[cfg(boa_jit_stencils)]
+                    jit_diagnostics.interpreter();
                     OPCODE_HANDLERS[opcode as usize](context, pc)
                 },
                 opcode,
