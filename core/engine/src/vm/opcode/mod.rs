@@ -21,6 +21,119 @@ use args::{Argument, read};
 use std::ops::ControlFlow;
 use thin_vec::ThinVec;
 
+#[cfg(feature = "jit")]
+pub(crate) type JitChainEntry =
+    unsafe extern "C" fn(*mut Context, usize, *const JitChain, *mut ControlFlow<CompletionRecord>);
+
+/// Borrowed view of cached code. The driver owns the entries and roots its code block.
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct JitCodeView {
+    pub(crate) code_block: *const super::CodeBlock,
+    pub(crate) entries: *const usize,
+    pub(crate) length: usize,
+}
+
+/// The cache view is immutable during execution; only the active frame selection changes.
+#[cfg(feature = "jit")]
+#[repr(C)]
+pub(crate) struct JitChain {
+    pub(crate) active: std::cell::Cell<JitCodeView>,
+    pub(crate) frame_depth: std::cell::Cell<usize>,
+    pub(crate) cached: *const JitCodeView,
+    pub(crate) cached_length: usize,
+    /// Optional execution counter owned by the driver, never by a handler stack frame.
+    pub(crate) executed: *mut u64,
+    pub(crate) frame_transfers: *mut u64,
+}
+
+// This marker has an ordinary implementation for the AOT module. Stencil lowering replaces
+// calls to it with an indirect LLVM musttail call using the uniform handler ABI.
+#[cfg(feature = "jit")]
+#[unsafe(no_mangle)]
+#[inline(never)]
+unsafe extern "C" fn boa_jit_tail(
+    entry: JitChainEntry,
+    context: *mut Context,
+    pc: usize,
+    chain: *const JitChain,
+    output: *mut ControlFlow<CompletionRecord>,
+) {
+    unsafe { entry(context, pc, chain, output) }
+}
+
+#[cfg(feature = "jit")]
+#[inline(always)]
+unsafe fn finish_jit_handler(
+    context: *mut Context,
+    chain: *const JitChain,
+    output: *mut ControlFlow<CompletionRecord>,
+    result: ControlFlow<CompletionRecord>,
+) {
+    if matches!(result, ControlFlow::Continue(())) {
+        // Continue owns no resources. Consume it before the tail transfer so rustc cannot
+        // leave a ControlFlow drop after the marker in less aggressively optimized builds.
+        std::mem::forget(result);
+        let state = unsafe { &*chain };
+        let vm = unsafe { &(*context).vm };
+        let frame = vm.frame();
+        let pc = frame.pc as usize;
+        // A host callback can enable tracing while a native chain is running.
+        #[cfg(feature = "trace")]
+        if vm.trace || frame.code_block.traceable() {
+            unsafe { output.write(ControlFlow::Continue(())) };
+            return;
+        }
+        let block = std::ptr::from_ref(&*frame.code_block);
+        let mut active = state.active.get();
+        let changed_block = block != active.code_block;
+        if changed_block {
+            // Inlined lookup over an immutable, address-sorted snapshot. No runtime helper
+            // call or compilation occurs on the native call/return path.
+            let mut low = 0;
+            let mut high = state.cached_length;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let candidate = unsafe { *state.cached.add(middle) };
+                if (candidate.code_block as usize) < block as usize {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            if low == state.cached_length {
+                unsafe { output.write(ControlFlow::Continue(())) };
+                return;
+            }
+            active = unsafe { *state.cached.add(low) };
+            if active.code_block != block {
+                unsafe { output.write(ControlFlow::Continue(())) };
+                return;
+            }
+        }
+        if pc < active.length {
+            let address = unsafe { *active.entries.add(pc) };
+            if address != 0 {
+                if changed_block || vm.frames.len() != state.frame_depth.get() {
+                    state.active.set(active);
+                    state.frame_depth.set(vm.frames.len());
+                    if !state.frame_transfers.is_null() {
+                        unsafe {
+                            *state.frame_transfers = (*state.frame_transfers).saturating_add(1)
+                        };
+                    }
+                }
+                let entry: JitChainEntry = unsafe { std::mem::transmute(address) };
+                return unsafe { boa_jit_tail(entry, context, pc, chain, output) };
+            }
+        }
+        unsafe { output.write(ControlFlow::Continue(())) };
+        return;
+    }
+    unsafe { output.write(result) };
+}
+
 mod args;
 
 // Operation modules
@@ -419,7 +532,9 @@ macro_rules! generate_opcodes {
 
         #[cfg(feature = "jit")]
         #[unsafe(no_mangle)]
-        pub(crate) static BOA_JIT_TEMPLATE_HANDLERS: [OpcodeHandler; 256] = OPCODE_HANDLERS;
+        pub(crate) static BOA_JIT_TEMPLATE_HANDLERS: [JitChainEntry; 256] = [
+            $(pastey::paste! { [<handle_jit_ $Variant:snake>] },)*
+        ];
 
         type OpcodeHandlerBudget = fn(&mut Context, usize, &mut u32) -> ControlFlow<CompletionRecord>;
 
@@ -433,6 +548,29 @@ macro_rules! generate_opcodes {
 
         $(
             pastey::paste! {
+                #[cfg(feature = "jit")]
+                #[unsafe(no_mangle)]
+                #[inline(never)]
+                #[allow(unused_parens)]
+                unsafe extern "C" fn [<handle_jit_ $Variant:snake>](
+                    context: *mut Context, pc: usize, chain: *const JitChain,
+                    output: *mut ControlFlow<CompletionRecord>,
+                ) {
+                    let counter = unsafe { (*chain).executed };
+                    if !counter.is_null() {
+                        unsafe { *counter = (*counter).saturating_add(1) };
+                    }
+                    let result = {
+                        let context = unsafe { &mut *context };
+                        let bytes = &context.vm.frame().code_block.bytecode.bytes;
+                        let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
+                        context.vm.frame_mut().pc = next_pc as u32;
+                        let result = $Variant::operation(args, context);
+                        IntoCompletionRecord::into_completion_record(result, context)
+                    };
+                    unsafe { finish_jit_handler(context, chain, output, result) };
+                }
+
                 #[cfg_attr(feature = "jit", unsafe(no_mangle))]
                 #[cfg_attr(feature = "jit", inline(never))]
                 #[cfg_attr(not(feature = "jit"), inline(always))]

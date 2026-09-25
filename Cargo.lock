@@ -542,6 +542,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "boa_jit_linker"
+version = "1.0.0-dev"
+dependencies = [
+ "llvm-sys",
+ "object",
+ "tempfile",
+]
+
+[[package]]
 name = "boa_macros"
 version = "0.22.0"
 dependencies = [

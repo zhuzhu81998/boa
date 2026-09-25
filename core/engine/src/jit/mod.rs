@@ -5,13 +5,103 @@
 use crate::{
     Context,
     vm::{
-        CompletionRecord,
-        opcode::{Bytecode, InstructionIterator, OPCODE_HANDLERS},
+        CodeBlock, CompletionRecord,
+        opcode::{
+            Bytecode, InstructionIterator, JitChain, JitChainEntry, JitCodeView, OPCODE_HANDLERS,
+        },
     },
 };
 use std::{fmt, mem::transmute, ops::ControlFlow, ptr};
 
-type JitEntry = unsafe fn(&mut Context, usize) -> ControlFlow<CompletionRecord>;
+/// Counts are local to one synchronous VM run; reentrant runs report separately.
+pub(crate) struct RunDiagnostics {
+    enabled: bool,
+    chains: u64,
+    native_opcodes: u64,
+    frame_transfers: u64,
+    interpreter_opcodes: u64,
+}
+
+impl RunDiagnostics {
+    pub(crate) fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("BOA_JIT_TRACE").is_some(),
+            chains: 0,
+            native_opcodes: 0,
+            frame_transfers: 0,
+            interpreter_opcodes: 0,
+        }
+    }
+
+    pub(crate) fn interpreter(&mut self) {
+        if self.enabled {
+            self.interpreter_opcodes = self.interpreter_opcodes.saturating_add(1);
+        }
+    }
+}
+
+impl Drop for RunDiagnostics {
+    fn drop(&mut self) {
+        if self.enabled {
+            eprintln!(
+                "JIT run summary: native_opcodes={} native_chains={} native_frame_transfers={} interpreter_opcodes={} (nested runs reported separately)",
+                self.native_opcodes, self.chains, self.frame_transfers, self.interpreter_opcodes
+            );
+        }
+    }
+}
+
+/// A run retains every compiled caller/callee, including failed compilation attempts.
+/// Owning a GC root prevents pointer reuse while a code block is used as a cache key.
+#[derive(Default)]
+pub(crate) struct JitCache {
+    code: std::collections::HashMap<*const CodeBlock, (boa_gc::Gc<CodeBlock>, Option<JitCode>)>,
+    views: Vec<JitCodeView>,
+}
+
+impl JitCache {
+    pub(crate) fn entry(
+        &mut self,
+        block: &boa_gc::Gc<CodeBlock>,
+        pc: usize,
+        frame_depth: usize,
+    ) -> Option<JitInvocation<'_>> {
+        let (_, code) = self
+            .code
+            .entry(ptr::from_ref(&**block))
+            .or_insert_with(|| (block.clone(), JitCode::compile(&block.bytecode)));
+        let code = code.as_ref()?;
+        let view = JitCodeView {
+            code_block: ptr::from_ref(&**block),
+            entries: code.entries.as_ptr(),
+            length: code.entries.len(),
+        };
+        if let Err(index) = self
+            .views
+            .binary_search_by_key(&(view.code_block as usize), |view| view.code_block as usize)
+        {
+            self.views.insert(index, view);
+        }
+        Some(JitInvocation {
+            _cache: std::marker::PhantomData,
+            entry: code.entry(pc)?,
+            chain: JitChain {
+                active: std::cell::Cell::new(view),
+                frame_depth: std::cell::Cell::new(frame_depth),
+                cached: self.views.as_ptr(),
+                cached_length: self.views.len(),
+                executed: ptr::null_mut(),
+                frame_transfers: ptr::null_mut(),
+            },
+        })
+    }
+}
+
+pub(crate) struct JitInvocation<'cache> {
+    _cache: std::marker::PhantomData<&'cache JitCache>,
+    entry: JitChainEntry,
+    chain: JitChain,
+}
 pub(super) type Emitter = fn(&mut FunctionBuilder) -> Result<usize, JitError>;
 
 #[derive(Clone, Copy)]
@@ -122,6 +212,7 @@ impl FunctionBuilder {
     fn finish(mut self) -> Result<ExecutableMemory, JitError> {
         let relocations = std::mem::take(&mut self.relocations);
         let mut resolved = Vec::with_capacity(relocations.len());
+        let mut direct_calls = Vec::new();
         for relocation in relocations {
             let target = match relocation.target {
                 RelocationTarget::External(index) => Target::Absolute(external_address(index)?),
@@ -129,6 +220,11 @@ impl FunctionBuilder {
             };
             let patch_target = match relocation.kind {
                 RelocationKind::PltRelative if matches!(target, Target::Absolute(_)) => {
+                    if relocation.size == 32
+                        && let Target::Absolute(address) = target
+                    {
+                        direct_calls.push((relocation.field, relocation.addend, address));
+                    }
                     let (island, pointer) = self.append_pointer_cell(true);
                     resolved.push((pointer, 0, 64, RelocationKind::Absolute, target));
                     Target::Offset(island)
@@ -167,6 +263,14 @@ impl FunctionBuilder {
                 RelocationKind::Absolute => target as i128 + addend as i128,
             };
             write_relocation(&mut self.code, field, size, value)?;
+        }
+        // Keep the reserved island as the fallback, but bypass it whenever the actual helper
+        // is reachable. GOT/data references remain pointer cells, not branch trampolines.
+        for (field, addend, target) in direct_calls {
+            let displacement = target as i128 + addend as i128 - (base + field) as i128;
+            if i32::try_from(displacement).is_ok() {
+                write_relocation(&mut self.code, field, 32, displacement)?;
+            }
         }
         memory.write_and_make_executable(&self.code)?;
         Ok(memory)
@@ -228,40 +332,95 @@ fn external_address(index: usize) -> Result<usize, JitError> {
 }
 
 pub(crate) struct JitCode {
-    memory: ExecutableMemory,
+    // Entries point into this mapping; keep ownership even though lookup uses absolute addresses.
+    _memory: ExecutableMemory,
     entries: Box<[usize]>,
 }
 
 impl JitCode {
     pub(crate) fn compile(bytecode: &Bytecode) -> Option<Self> {
-        let mut builder = FunctionBuilder::new().ok()?;
+        match Self::try_compile(bytecode) {
+            Ok(code) => {
+                if std::env::var_os("BOA_JIT_TRACE").is_some() {
+                    let entries = code.as_ref().map_or(0, |code| {
+                        code.entries.iter().filter(|&&entry| entry != 0).count()
+                    });
+                    eprintln!("JIT compiled {entries} bytecode entries");
+                }
+                code
+            }
+            Err(error) => {
+                if std::env::var_os("BOA_JIT_TRACE").is_some() {
+                    eprintln!("JIT compilation failed: {error}");
+                }
+                None
+            }
+        }
+    }
+
+    fn try_compile(bytecode: &Bytecode) -> Result<Option<Self>, JitError> {
+        let mut builder = FunctionBuilder::new()?;
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
             if let Some(emitter) = EMITTERS[opcode as usize] {
-                entries[pc] = emitter(&mut builder).ok()?;
+                entries[pc] = emitter(&mut builder)?;
             }
         }
-        if builder.code.is_empty() {
-            return None;
+        if entries.iter().all(|&entry| entry == usize::MAX) {
+            return Ok(None);
         }
-        Some(Self {
-            memory: builder.finish().ok()?,
+        let memory = builder.finish()?;
+        for entry in &mut entries {
+            *entry = if *entry == usize::MAX {
+                0
+            } else {
+                memory.as_ptr() as usize + *entry
+            };
+        }
+        Ok(Some(Self {
+            _memory: memory,
             entries: entries.into_boxed_slice(),
-        })
+        }))
     }
 
-    pub(crate) fn entry(&self, pc: usize) -> Option<JitEntry> {
-        let offset = *self.entries.get(pc)?;
-        (offset != usize::MAX).then(|| unsafe { transmute(self.memory.as_ptr().add(offset)) })
+    pub(crate) fn entry(&self, pc: usize) -> Option<JitChainEntry> {
+        let address = *self.entries.get(pc)?;
+        (address != 0).then(|| unsafe { transmute(address) })
     }
 }
 
 pub(crate) fn execute(
-    entry: JitEntry,
+    mut invocation: JitInvocation<'_>,
     context: &mut Context,
     pc: usize,
+    diagnostics: &mut RunDiagnostics,
 ) -> ControlFlow<CompletionRecord> {
-    unsafe { entry(context, pc) }
+    let mut executed = 0_u64;
+    let mut frame_transfers = 0_u64;
+    if diagnostics.enabled {
+        invocation.chain.executed = &mut executed;
+        invocation.chain.frame_transfers = &mut frame_transfers;
+        eprintln!(
+            "JIT entering native chain at pc {pc}, entry={:p}",
+            invocation.entry as *const ()
+        );
+    }
+    let mut output = std::mem::MaybeUninit::uninit();
+    // Every chain exit writes exactly one result. The cache outlives this synchronous call,
+    // including any reentrant VM runs, and keeps its executable mappings and GC roots alive.
+    let result = unsafe {
+        (invocation.entry)(context, pc, &invocation.chain, output.as_mut_ptr());
+        output.assume_init()
+    };
+    if diagnostics.enabled {
+        diagnostics.chains = diagnostics.chains.saturating_add(1);
+        diagnostics.native_opcodes = diagnostics.native_opcodes.saturating_add(executed);
+        diagnostics.frame_transfers = diagnostics.frame_transfers.saturating_add(frame_transfers);
+        eprintln!(
+            "JIT returned from native chain: native_opcodes={executed} native_frame_transfers={frame_transfers}"
+        );
+    }
+    result
 }
 
 struct ExecutableMemory {
@@ -271,9 +430,18 @@ struct ExecutableMemory {
 
 impl ExecutableMemory {
     fn allocate(length: usize) -> Result<Self, JitError> {
-        let raw = unsafe {
+        // A non-fixed hint cannot overwrite an existing mapping. The OS may place this
+        // elsewhere; out-of-range helper branches still have their reserved trampolines.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let page_size = usize::try_from(page_size)
+            .ok()
+            .filter(|&size| size != 0)
+            .unwrap_or(4096);
+        let anchor = OPCODE_HANDLERS[0] as *const () as usize;
+        let hint = (anchor / page_size * page_size).saturating_add(64 * 1024 * 1024);
+        let mut raw = unsafe {
             libc::mmap(
-                ptr::null_mut(),
+                hint as *mut libc::c_void,
                 length,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
@@ -281,6 +449,18 @@ impl ExecutableMemory {
                 0,
             )
         };
+        if raw == libc::MAP_FAILED {
+            raw = unsafe {
+                libc::mmap(
+                    ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+        }
         if raw == libc::MAP_FAILED {
             return Err(JitError::Allocation);
         }

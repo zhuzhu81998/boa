@@ -71,6 +71,8 @@ pub(super) fn generate(
     handler_table: &str,
     opcode_count: usize,
     llvm_ir: &Path,
+    runtime_ir: &Path,
+    holes: &BTreeMap<String, String>,
 ) -> Result<Generated, String> {
     if !llvm_ir.is_file() {
         return Err(format!("missing LLVM IR: {}", llvm_ir.display()));
@@ -149,8 +151,12 @@ pub(super) fn generate(
         .map(|(index, name)| (name, index))
         .collect();
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is missing")?);
-    let names: Vec<String> = external.keys().cloned().collect();
-    llvm_resolver::generate(llvm_ir, &names, &out)?;
+    let names: Vec<String> = external
+        .keys()
+        .map(|name| holes.get(name).unwrap_or(name).clone())
+        .collect();
+    llvm_resolver::generate(runtime_ir, &names, &out)?;
+    fs::write(out.join("jit_runtime_holes.txt"), names.join("\n")).map_err(|e| e.to_string())?;
     emit_metadata(
         &archive,
         &stencils,
