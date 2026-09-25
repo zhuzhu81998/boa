@@ -88,6 +88,7 @@ unsafe fn lower_inner(
         roots.insert(value as usize);
     }
     lower_tail_calls(module.0, &roots)?;
+    lower_constants(module.0, &roots)?;
     outline_tls(module.0, &roots)?;
     // These retain unrelated runtime definitions and have no purpose in the extracted module.
     for name in [c"llvm.used", c"llvm.compiler.used"] {
@@ -108,6 +109,9 @@ unsafe fn lower_inner(
             continue;
         }
         let original = value_name(value)?;
+        if original.starts_with("BOA_JIT_CONST_") {
+            continue;
+        }
         let hole = format!("BOA_JIT_HOLE_{}", holes.len());
         let name = CString::new(hole.as_str()).unwrap();
         let declaration = LLVMAddFunction(module.0, name.as_ptr(), LLVMGlobalGetValueType(value));
@@ -158,10 +162,62 @@ unsafe fn lower_inner(
     Ok(holes)
 }
 
+/// Emit absolute immediate relocations, not GOT loads or calls to a runtime resolver.
+unsafe fn lower_constants(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Result<(), String> {
+    let marker = LLVMGetNamedFunction(module, c"boa_jit_constant".as_ptr());
+    if marker.is_null() {
+        return Ok(());
+    }
+    let builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(module));
+    for &root in roots {
+        let mut block = LLVMGetFirstBasicBlock(root as LLVMValueRef);
+        while !block.is_null() {
+            let mut instruction = LLVMGetFirstInstruction(block);
+            while !instruction.is_null() {
+                let next = LLVMGetNextInstruction(instruction);
+                if !LLVMIsACallInst(instruction).is_null()
+                    && LLVMGetCalledValue(instruction) == marker
+                {
+                    let slot = LLVMGetOperand(instruction, 0);
+                    if LLVMIsAConstantInt(slot).is_null() {
+                        return Err("nonconstant patch slot".into());
+                    }
+                    let slot = LLVMConstIntGetZExtValue(slot);
+                    if slot > 6 {
+                        return Err("invalid patch slot".into());
+                    }
+                    let asm = format!("movabsq $$BOA_JIT_CONST_{slot}, $0");
+                    let ty = LLVMFunctionType(LLVMTypeOf(instruction), ptr::null_mut(), 0, 0);
+                    let asm = LLVMGetInlineAsm(
+                        ty,
+                        asm.as_ptr().cast(),
+                        asm.len(),
+                        c"=r".as_ptr(),
+                        2,
+                        0,
+                        0,
+                        llvm_sys::LLVMInlineAsmDialect::LLVMInlineAsmDialectATT,
+                        0,
+                    );
+                    LLVMPositionBuilderBefore(builder, instruction);
+                    let value = LLVMBuildCall2(builder, ty, asm, ptr::null_mut(), 0, c"".as_ptr());
+                    LLVMReplaceAllUsesWith(instruction, value);
+                    LLVMInstructionEraseFromParent(instruction);
+                }
+                instruction = next;
+            }
+            block = LLVMGetNextBasicBlock(block);
+        }
+    }
+    LLVMDisposeBuilder(builder);
+    Ok(())
+}
+
 /// Turn the source marker into a stack-neutral transfer. Never discard cleanup code to force
 /// a tail call: accept only an immediate return or a branch to a bare return block.
 unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Result<(), String> {
     let marker = LLVMGetNamedFunction(module, c"boa_jit_tail".as_ptr());
+    let next_marker = LLVMGetNamedFunction(module, c"boa_jit_next".as_ptr());
     if marker.is_null() {
         return Ok(());
     }
@@ -173,8 +229,10 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
             let mut instruction = LLVMGetFirstInstruction(block);
             while !instruction.is_null() {
                 if !LLVMIsACallInst(instruction).is_null()
-                    && LLVMGetCalledValue(instruction) == marker
+                    && (LLVMGetCalledValue(instruction) == marker
+                        || LLVMGetCalledValue(instruction) == next_marker)
                 {
+                    let first_argument = u32::from(LLVMGetCalledValue(instruction) == marker);
                     let next = LLVMGetNextInstruction(instruction);
                     let return_block = if !next.is_null()
                         && !LLVMIsABranchInst(next).is_null()
@@ -193,12 +251,18 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
                             value_name(function)?
                         ));
                     }
-                    if LLVMCountParams(function) != 4 || LLVMGetNumArgOperands(instruction) != 5 {
+                    if LLVMCountParams(function) != 4
+                        || LLVMGetNumArgOperands(instruction) != 4 + first_argument
+                    {
                         return Err("unexpected native chain ABI".into());
                     }
                     // These pointers must outlive the current native stack frame. Only forward
                     // the original parameters, never an address of a handler-local temporary.
-                    for (argument, parameter) in [(1, 0), (3, 2), (4, 3)] {
+                    for (argument, parameter) in [
+                        (first_argument, 0),
+                        (first_argument + 2, 2),
+                        (first_argument + 3, 3),
+                    ] {
                         if LLVMGetOperand(instruction, argument)
                             != LLVMGetParam(function, parameter)
                         {
@@ -207,7 +271,7 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
                             );
                         }
                     }
-                    calls.push((function, instruction, next));
+                    calls.push((function, instruction, next, first_argument));
                 }
                 instruction = LLVMGetNextInstruction(instruction);
             }
@@ -215,9 +279,20 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
         }
     }
     let builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(module));
-    for (function, old, terminator) in calls {
-        let target = LLVMGetOperand(old, 0);
-        let mut arguments: Vec<_> = (1..5).map(|index| LLVMGetOperand(old, index)).collect();
+    for (function, old, terminator, first_argument) in calls {
+        let target = if first_argument == 1 {
+            LLVMGetOperand(old, 0)
+        } else {
+            let name = c"BOA_JIT_CONST_6";
+            let mut target = LLVMGetNamedFunction(module, name.as_ptr());
+            if target.is_null() {
+                target = LLVMAddFunction(module, name.as_ptr(), LLVMGlobalGetValueType(function));
+            }
+            target
+        };
+        let mut arguments: Vec<_> = (first_argument..first_argument + 4)
+            .map(|index| LLVMGetOperand(old, index))
+            .collect();
         LLVMPositionBuilderBefore(builder, old);
         let call = LLVMBuildCall2(
             builder,

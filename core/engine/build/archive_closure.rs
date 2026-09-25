@@ -33,6 +33,7 @@ enum Classification {
     Reject(String),
 }
 
+#[derive(Clone)]
 struct Reloc {
     offset: u32,
     addend: i64,
@@ -42,12 +43,14 @@ struct Reloc {
 }
 
 struct Stencil {
+    root: SymbolRef,
     name: String,
     bytes: Vec<u8>,
     relocations: Vec<Reloc>,
     unsupported: Option<String>,
 }
 
+#[derive(Clone)]
 struct ClosureSection {
     id: SectionRef,
     address: u64,
@@ -147,6 +150,7 @@ pub(super) fn generate(
     }
     let external: BTreeMap<String, usize> = external_names
         .into_iter()
+        .filter(|name| !name.starts_with("BOA_JIT_CONST_"))
         .enumerate()
         .map(|(index, name)| (name, index))
         .collect();
@@ -278,6 +282,7 @@ fn extract_stencils(
             }
         }
         stencils.push(Stencil {
+            root,
             name,
             bytes,
             relocations,
@@ -374,6 +379,9 @@ fn queue_target(
         let Target::External(name) = target else {
             unreachable!()
         };
+        if name.starts_with("BOA_JIT_CONST_") {
+            return Ok(());
+        }
         if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
             return Err(format!(
                 "external symbol {name:?} has no typed declaration in boa_engine.ll"
@@ -659,6 +667,13 @@ fn target_expr(
         }
     };
     let name = name.expect("external target has a name");
+    if let Some(slot) = name.strip_prefix("BOA_JIT_CONST_") {
+        let slot: usize = slot.parse().map_err(|_| "invalid constant slot")?;
+        if slot > 6 {
+            return Err("invalid constant slot".into());
+        }
+        return Ok(format!("RelocationTarget::Constant({slot})"));
+    }
     let index = external
         .get(name)
         .ok_or_else(|| format!("external symbol {name:?} missing from resolver table"))?;
@@ -684,12 +699,6 @@ fn emit_metadata(
     out: &Path,
 ) -> Result<(), String> {
     let mut stencil_blob = Vec::new();
-    let closure_len = closure
-        .iter()
-        .map(|section| section.blob_offset + section.bytes.len())
-        .max()
-        .unwrap_or(0);
-    let mut closure_blob = vec![0u8; closure_len];
     let mut generated = String::from("// @generated from actual boa_engine opcode handlers.\n");
     generated.push_str("pub(super) static EXTERNAL_NAMES: &[&str] = &[\n");
     for name in external.keys() {
@@ -700,25 +709,7 @@ fn emit_metadata(
         "unsafe extern \"C\" {{ static BOA_JIT_EXTERNAL_SYMBOLS: [usize; {}]; }}\n\n",
         external.len()
     ));
-    generated.push_str("static INTERNAL_CLOSURE_RELOCS: &[StencilRelocation] = &[\n");
-    for section in closure {
-        closure_blob[section.blob_offset..section.blob_offset + section.bytes.len()]
-            .copy_from_slice(&section.bytes);
-        for relocation in &section.relocations {
-            let offset = section
-                .blob_offset
-                .checked_add(relocation.offset as usize)
-                .ok_or("closure relocation offset overflow")?;
-            let target = target_expr(archive, closure, externalized, external, &relocation.target)?;
-            generated.push_str(&format!(
-                "    StencilRelocation {{ offset: {offset}, addend: {}, size: {}, kind: RelocationKind::{}, target: {target} }},\n",
-                relocation.addend,
-                relocation.size,
-                kind_name(relocation.kind)
-            ));
-        }
-    }
-    generated.push_str("];\n\n");
+    generated.push_str("static INTERNAL_CLOSURE_RELOCS: &[StencilRelocation] = &[];\n\n");
     for (opcode, stencil) in stencils.iter().enumerate() {
         if !supported.contains(&opcode) {
             generated.push_str(&format!(
@@ -727,25 +718,91 @@ fn emit_metadata(
             ));
             continue;
         }
+        // A jump table can point back into the handler. Keep that cycle in this instruction's
+        // bundle: a shared copy of the handler would have another instance's operand holes.
+        let file = archive.file(stencil.root.member)?;
+        let root = file
+            .symbol_by_index(stencil.root.symbol)
+            .map_err(|e| e.to_string())?;
+        let root_id = SectionRef {
+            member: stencil.root.member,
+            section: root.section_index().ok_or("root without section")?.0,
+        };
+        let mut bundle = vec![ClosureSection {
+            id: root_id,
+            address: root.address(),
+            align: 16,
+            blob_offset: 0,
+            bytes: stencil.bytes.clone(),
+            relocations: stencil.relocations.clone(),
+        }];
+        let mut seen = BTreeSet::from([root_id]);
+        let mut index = 0;
+        while index < bundle.len() {
+            let targets: Vec<_> = bundle[index]
+                .relocations
+                .iter()
+                .filter_map(|r| match r.target {
+                    Target::Internal(symbol) if !externalized.contains(&symbol) => Some(symbol),
+                    _ => None,
+                })
+                .collect();
+            for target in targets {
+                let file = archive.file(target.member)?;
+                let symbol = file
+                    .symbol_by_index(target.symbol)
+                    .map_err(|e| e.to_string())?;
+                let id = SectionRef {
+                    member: target.member,
+                    section: symbol.section_index().ok_or("target without section")?.0,
+                };
+                if seen.insert(id) {
+                    bundle.push(
+                        closure
+                            .iter()
+                            .find(|section| section.id == id)
+                            .ok_or("missing instance-local section")?
+                            .clone(),
+                    );
+                }
+            }
+            index += 1;
+        }
+        layout_closure(&mut bundle)?;
+        let alignment = bundle
+            .iter()
+            .map(|section| section.align)
+            .max()
+            .unwrap_or(16)
+            .max(16);
+        if alignment > 4096 {
+            return Err("stencil alignment exceeds executable page alignment".into());
+        }
         let start = stencil_blob.len();
-        stencil_blob.extend_from_slice(&stencil.bytes);
+        for section in &bundle {
+            stencil_blob.resize(start + section.blob_offset, 0);
+            stencil_blob.extend_from_slice(&section.bytes);
+        }
         generated.push_str(&format!("// opcode {opcode}: {}\n", stencil.name));
         generated.push_str(&format!(
             "static RELOCS_{opcode:03}: &[StencilRelocation] = &[\n"
         ));
-        for relocation in &stencil.relocations {
-            let target = target_expr(archive, closure, externalized, external, &relocation.target)?;
-            generated.push_str(&format!(
+        for section in &bundle {
+            for relocation in &section.relocations {
+                let target =
+                    target_expr(archive, &bundle, externalized, external, &relocation.target)?;
+                generated.push_str(&format!(
                 "    StencilRelocation {{ offset: {}, addend: {}, size: {}, kind: RelocationKind::{}, target: {target} }},\n",
-                relocation.offset,
+                section.blob_offset + relocation.offset as usize,
                 relocation.addend,
                 relocation.size,
                 kind_name(relocation.kind)
             ));
+            }
         }
         generated.push_str("];\n");
         generated.push_str(&format!(
-            "fn emit_{opcode:03}(out: &mut FunctionBuilder) -> Result<usize, JitError> {{ out.append_stencil(&STENCIL_BLOB[{start}..{}], RELOCS_{opcode:03}) }}\n\n",
+            "fn emit_{opcode:03}(out: &mut FunctionBuilder) -> Result<usize, JitError> {{ out.append_stencil(&STENCIL_BLOB[{start}..{}], RELOCS_{opcode:03}, {alignment}) }}\n\n",
             stencil_blob.len()
         ));
     }
@@ -762,6 +819,6 @@ fn emit_metadata(
     }
     generated.push_str("];\n");
     fs::write(out.join("jit_stencils.bin"), stencil_blob).map_err(|e| e.to_string())?;
-    fs::write(out.join("jit_internal_closure.bin"), closure_blob).map_err(|e| e.to_string())?;
+    fs::write(out.join("jit_internal_closure.bin"), []).map_err(|e| e.to_string())?;
     fs::write(out.join("jit_stencils_generated.rs"), generated).map_err(|e| e.to_string())
 }

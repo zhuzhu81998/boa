@@ -8,7 +8,9 @@ use llvm_sys::{
     core::*,
     ir_reader::LLVMParseIRInContext2,
     prelude::*,
-    target::{LLVMABISizeOfType, LLVMCreateTargetData, LLVMDisposeTargetData},
+    target::{
+        LLVMABIAlignmentOfType, LLVMABISizeOfType, LLVMCreateTargetData, LLVMDisposeTargetData,
+    },
 };
 use std::{
     ffi::{CStr, CString},
@@ -130,7 +132,8 @@ unsafe fn inject_inner(
         if !same_type(
             LLVMGlobalGetValueType(source),
             LLVMGlobalGetValueType(target),
-        ) {
+        ) && !(!is_function && compatible_byte_storage(runtime.0, source, target))
+        {
             return Err(format!("ABI type mismatch for {}", name.to_string_lossy()));
         }
         if is_function && LLVMGetFunctionCallConv(source) != LLVMGetFunctionCallConv(target) {
@@ -202,6 +205,46 @@ unsafe fn anonymous_constant(value: LLVMValueRef) -> bool {
         && LLVMIsGlobalConstant(value) != 0
         && LLVMIsDeclaration(value) == 0
         && LLVMGetUnnamedAddress(value) == llvm_sys::LLVMUnnamedAddr::LLVMGlobalUnnamedAddr
+}
+
+/// Rust can declare a named static as a typed struct while defining its storage as bytes.
+/// This exception is deliberately asymmetric: never relax function signatures, anonymous
+/// constant matching, or comparisons between two arbitrary same-sized types.
+unsafe fn compatible_byte_storage(
+    module: LLVMModuleRef,
+    source: LLVMValueRef,
+    target: LLVMValueRef,
+) -> bool {
+    use llvm_sys::LLVMTypeKind::*;
+    if LLVMIsAGlobalVariable(source).is_null()
+        || LLVMIsAGlobalVariable(target).is_null()
+        || LLVMIsDeclaration(source) == 0
+        || LLVMIsDeclaration(target) != 0
+        || LLVMIsThreadLocal(source) != 0
+        || LLVMIsThreadLocal(target) != 0
+        || !same_type(LLVMTypeOf(source), LLVMTypeOf(target))
+    {
+        return false;
+    }
+    let expected = LLVMGlobalGetValueType(source);
+    let storage = LLVMGlobalGetValueType(target);
+    if LLVMGetTypeKind(expected) != LLVMStructTypeKind
+        || LLVMTypeIsSized(expected) == 0
+        || LLVMGetTypeKind(storage) != LLVMArrayTypeKind
+    {
+        return false;
+    }
+    let element = LLVMGetElementType(storage);
+    if LLVMGetTypeKind(element) != LLVMIntegerTypeKind || LLVMGetIntTypeWidth(element) != 8 {
+        return false;
+    }
+    let layout = LLVMCreateTargetData(LLVMGetDataLayoutStr(module));
+    let required_alignment = LLVMGetAlignment(source).max(LLVMABIAlignmentOfType(layout, expected));
+    let actual_alignment = LLVMGetAlignment(target).max(LLVMABIAlignmentOfType(layout, storage));
+    let compatible = LLVMABISizeOfType(layout, expected) == LLVMABISizeOfType(layout, storage)
+        && actual_alignment >= required_alignment;
+    LLVMDisposeTargetData(layout);
+    compatible
 }
 
 unsafe fn tls_accessor(
@@ -429,6 +472,30 @@ fn compiler_runtime(name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::inject;
+
+    #[test]
+    fn named_struct_static_can_use_aligned_byte_storage() {
+        let request = "@requested = external global { i64, i64 }";
+        assert!(
+            constant_request(
+                "@requested = constant [16 x i8] zeroinitializer, align 8",
+                request
+            )
+            .unwrap()
+            .is_some()
+        );
+        for definition in [
+            "@requested = constant [8 x i8] zeroinitializer, align 8",
+            "@requested = constant [16 x i8] zeroinitializer, align 1",
+            "@requested = constant { double, double } zeroinitializer, align 8",
+            "@requested = thread_local global [16 x i8] zeroinitializer, align 8",
+        ] {
+            assert!(
+                constant_request(definition, request).is_err(),
+                "{definition}"
+            );
+        }
+    }
 
     fn constant_request(
         runtime_constant: &str,

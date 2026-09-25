@@ -9,7 +9,14 @@ if [[ ${BOA_JIT_DRIVER_COMPILER:-} == 1 ]]; then
     shift
     previous=
     engine=0
+    crate_name=
+    output_dir=
+    extra_filename=
     for argument in "$@"; do
+        if [[ $previous == --crate-name ]]; then crate_name=$argument; fi
+        if [[ $previous == --out-dir ]]; then output_dir=$argument; fi
+        if [[ $previous == -C && $argument == extra-filename=* ]]; then extra_filename=${argument#extra-filename=}; fi
+        if [[ $argument == -Cextra-filename=* ]]; then extra_filename=${argument#-Cextra-filename=}; fi
         if [[ $previous == --crate-name && $argument == boa_engine ]]; then
             engine=1
         fi
@@ -17,6 +24,16 @@ if [[ ${BOA_JIT_DRIVER_COMPILER:-} == 1 ]]; then
     done
     if [[ $engine == 1 && ${BOA_JIT_BUILD_TEMPLATE:-} == 1 ]]; then
         exec "$compiler" "$@" "--emit=llvm-ir=$BOA_JIT_DRIVER_IR"
+    fi
+    if [[ -n ${BOA_JIT_TEMPLATE_LLVM_IR:-} ]]; then
+        if [[ $engine == 1 ]]; then
+            "$compiler" "$@"
+            "$BOA_JIT_DRIVER_LINKER" --prepare-runtime \
+                "$output_dir/libboa_engine$extra_filename.rlib" "$OUT_DIR"
+            exit 0
+        elif [[ $crate_name == boa ]]; then
+            export BOA_JIT_RESOLVER_PREPARED=1
+        fi
     fi
     exec "$compiler" "$@"
 fi
@@ -31,7 +48,7 @@ fi
 if [[ ${1:-} == --help ]]; then
     echo 'Usage: ./tools/jit-run.sh [--build-only] [Boa CLI arguments...]'
     echo 'Example: ./tools/jit-run.sh simple-loop.js'
-    echo 'Builds the experimental JIT CLI without optional CLI default features.'
+    echo 'Builds the experimental JIT CLI with normal CLI default features.'
     exit 0
 fi
 
@@ -70,9 +87,9 @@ if [[ ! -x $binary || ! -f $template || ! -f $stamp || $(<"$stamp") != "$fingerp
         # template-only build, another wrapper, or flags that change Rust symbol identities.
         unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
         unset BOA_JIT_BUILD_TEMPLATE BOA_JIT_TEMPLATE_LLVM_IR BOA_JIT_REUSE_GENERATED
+        unset BOA_JIT_RESOLVER_PREPARED
         export LLVM_SYS_221_PREFIX=${LLVM_SYS_221_PREFIX:-/usr/lib/llvm-22}
-        export CARGO_PROFILE_RELEASE_LTO=off
-        export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+        # Inherit release optimization, fat LTO, codegen units, and stripping.
 
         echo 'Building JIT linker wrapper...' >&2
         CARGO_TARGET_DIR="$tool_dir" cargo build -p boa_jit_linker
@@ -81,19 +98,22 @@ if [[ ! -x $binary || ! -f $template || ! -f $stamp || $(<"$stamp") != "$fingerp
         export RUSTC_WORKSPACE_WRAPPER="$driver"
         export BOA_JIT_DRIVER_COMPILER=1
         export BOA_JIT_DRIVER_IR="$template"
-        flags=(-Cpanic=abort -Clink-dead-code -Clinker-plugin-lto
-            "-Clinker=$tool_dir/debug/boa_jit_linker" -Clink-arg=-fuse-ld=lld)
+        export BOA_JIT_DRIVER_LINKER="$tool_dir/debug/boa_jit_linker"
+        # Native JIT frames do not yet support Rust unwinding.
+        flags=(-Cpanic=abort -Clinker-plugin-lto
+            "-Clinker=$tool_dir/debug/boa_jit_linker" -Clink-arg=-fuse-ld=lld
+            -Clink-arg=-Wl,--lto-O3)
         printf -v CARGO_ENCODED_RUSTFLAGS '%s\x1f' "${flags[@]}"
         export CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}
 
         echo 'Building canonical template with CLI dependency features...' >&2
         BOA_JIT_BUILD_TEMPLATE=1 cargo build --release -p boa_cli \
-            --no-default-features --features boa_engine/jit
+            --features boa_engine/jit
         [[ -s $template ]] || { echo 'Missing generated engine LLVM IR' >&2; exit 1; }
 
         echo 'Building JIT-enabled Boa CLI...' >&2
         BOA_JIT_TEMPLATE_LLVM_IR="$template" cargo build --release -p boa_cli \
-            --no-default-features --features boa_engine/jit
+            --features boa_engine/jit
     )
     printf '%s\n' "$fingerprint" > "$stamp"
 fi
