@@ -115,29 +115,9 @@ pub(super) fn generate(
             ),
         }
     }
-    let mut closure: Vec<_> = closure_by_id.into_values().collect();
-    layout_closure(&mut closure)?;
-
-    for (opcode, stencil) in stencils.iter().enumerate() {
-        if !supported.contains(&opcode) {
-            continue;
-        }
-        for relocation in &stencil.relocations {
-            if let Target::External(name) = &relocation.target {
-                external_names.insert(name.clone());
-            }
-        }
-    }
-    for section in &closure {
-        for relocation in &section.relocations {
-            if let Target::External(name) = &relocation.target {
-                external_names.insert(name.clone());
-            }
-        }
-    }
+    let closure: Vec<_> = closure_by_id.into_values().collect();
     let external: BTreeMap<String, usize> = external_names
         .into_iter()
-        .filter(|name| !name.starts_with("BOA_JIT_CONST_"))
         .enumerate()
         .map(|(index, name)| (name, index))
         .collect();
