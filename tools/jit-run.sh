@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a matching template/runtime pair using the CLI's actual dependency graph.
+# Build a matching template/runtime pair using the selected package's dependency graph.
 set -euo pipefail
 
 # Cargo invokes this same script as RUSTC_WORKSPACE_WRAPPER. Only the engine gets
@@ -31,7 +31,9 @@ if [[ ${BOA_JIT_DRIVER_COMPILER:-} == 1 ]]; then
             "$BOA_JIT_DRIVER_LINKER" --prepare-runtime \
                 "$output_dir/libboa_engine$extra_filename.rlib" "$OUT_DIR"
             exit 0
-        elif [[ $crate_name == boa ]]; then
+        else
+            # All consumers use the engine archive prepared above, regardless of
+            # their crate name. The linker only acts on this flag for JIT links.
             export BOA_JIT_RESOLVER_PREPARED=1
         fi
     fi
@@ -41,33 +43,55 @@ fi
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 driver="$repo/tools/jit-run.sh"
 build_only=0
-if [[ ${1:-} == --build-only ]]; then
-    build_only=1
-    shift
-fi
-if [[ ${1:-} == --help ]]; then
-    echo 'Usage: ./tools/jit-run.sh [--build-only] [Boa CLI arguments...]'
-    echo 'Example: ./tools/jit-run.sh simple-loop.js'
-    echo 'Builds the experimental JIT CLI with normal CLI default features.'
-    exit 0
+package=boa_cli
+bin=
+while (($#)); do
+    case $1 in
+        --build-only) build_only=1; shift ;;
+        -p|--package|--bin)
+            if [[ $# -lt 2 || ! $2 =~ ^[a-zA-Z0-9_][a-zA-Z0-9_-]*$ ]]; then
+                echo "$1 requires a Cargo package/binary name" >&2
+                exit 2
+            fi
+            if [[ $1 == --bin ]]; then bin=$2; else package=$2; fi
+            shift 2
+            ;;
+        --help)
+            echo 'Usage: ./tools/jit-run.sh [--build-only] [-p PACKAGE] [--bin BINARY] [--] [program arguments...]'
+            echo 'Defaults: package boa_cli, binary boa. Other packages default to a binary with the package name.'
+            echo 'Example: ./tools/jit-run.sh -p boa_tester -- run --suite test/language/expressions -v'
+            echo 'Builds with the selected package’s default features plus boa_engine/jit.'
+            exit 0
+            ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+if [[ -z $bin ]]; then
+    if [[ $package == boa_cli ]]; then bin=boa; else bin=$package; fi
 fi
 
 build_dir="$repo/target/jit-cli"
+if [[ $package != boa_cli || $bin != boa ]]; then
+    # Keep canonical templates isolated when consumer feature graphs differ.
+    build_dir="$repo/target/jit-packages/$package/$bin"
+fi
 tool_dir="$repo/target/jit-tools"
-binary="$build_dir/release/boa"
+binary="$build_dir/release/$bin"
 template="$build_dir/boa_engine_template.ll"
 stamp="$build_dir/source-fingerprint"
 mkdir -p "$build_dir"
 exec 9>"$build_dir/driver.lock"
 flock 9
 
-# Preserve the caller's directory for relative JavaScript file arguments.
+# Preserve the caller's directory for program arguments.
 fingerprint=$(
     cd "$repo"
     {
         rustc -vV
+        printf '%s\n' "$package" "$bin"
         git ls-files --cached --others --exclude-standard -z -- \
-            core cli utils tools/jit-linker .cargo Cargo.toml Cargo.lock tools/jit-run.sh |
+            core cli tests tools utils examples .cargo Cargo.toml Cargo.lock |
             while IFS= read -r -d '' file; do
                 # Tracked files may have been deleted in the working tree.
                 if [[ -f $file ]]; then
@@ -106,14 +130,13 @@ if [[ ! -x $binary || ! -f $template || ! -f $stamp || $(<"$stamp") != "$fingerp
         printf -v CARGO_ENCODED_RUSTFLAGS '%s\x1f' "${flags[@]}"
         export CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}
 
-        echo 'Building canonical template with CLI dependency features...' >&2
-        BOA_JIT_BUILD_TEMPLATE=1 cargo build --release -p boa_cli \
-            --features boa_engine/jit
+        cargo_args=(build --release -p "$package" --bin "$bin" --features boa_engine/jit)
+        echo "Building canonical template for $package ($bin)..." >&2
+        BOA_JIT_BUILD_TEMPLATE=1 cargo "${cargo_args[@]}"
         [[ -s $template ]] || { echo 'Missing generated engine LLVM IR' >&2; exit 1; }
 
-        echo 'Building JIT-enabled Boa CLI...' >&2
-        BOA_JIT_TEMPLATE_LLVM_IR="$template" cargo build --release -p boa_cli \
-            --features boa_engine/jit
+        echo "Building JIT-enabled $bin..." >&2
+        BOA_JIT_TEMPLATE_LLVM_IR="$template" cargo "${cargo_args[@]}"
     )
     printf '%s\n' "$fingerprint" > "$stamp"
 fi
