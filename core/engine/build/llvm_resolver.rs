@@ -278,21 +278,11 @@ unsafe fn take_message(message: *mut i8) -> String {
 
 #[allow(dead_code)]
 pub(super) struct ModuleSymbols {
-    definitions: BTreeSet<String>,
-    linkable_definitions: BTreeSet<String>,
     declarations: BTreeSet<String>,
 }
 
 #[allow(dead_code)]
 impl ModuleSymbols {
-    pub(super) fn is_definition(&self, name: &str) -> bool {
-        self.definitions.contains(name)
-    }
-
-    pub(super) fn is_linkable_definition(&self, name: &str) -> bool {
-        self.linkable_definitions.contains(name)
-    }
-
     pub(super) fn is_declaration(&self, name: &str) -> bool {
         self.declarations.contains(name)
     }
@@ -330,43 +320,22 @@ unsafe fn module_symbols_in_context(
     if parsed != 0 {
         return Err(take_message(message));
     }
-    let mut definitions = BTreeSet::new();
-    let mut linkable_definitions = BTreeSet::new();
     let mut declarations = BTreeSet::new();
     let mut function = LLVMGetFirstFunction(module);
     while !function.is_null() {
-        insert_symbol(
-            function,
-            &mut definitions,
-            &mut linkable_definitions,
-            &mut declarations,
-        );
+        insert_symbol(function, &mut declarations);
         function = LLVMGetNextFunction(function);
     }
     let mut global = LLVMGetFirstGlobal(module);
     while !global.is_null() {
-        insert_symbol(
-            global,
-            &mut definitions,
-            &mut linkable_definitions,
-            &mut declarations,
-        );
+        insert_symbol(global, &mut declarations);
         global = LLVMGetNextGlobal(global);
     }
     LLVMDisposeModule(module);
-    Ok(ModuleSymbols {
-        definitions,
-        linkable_definitions,
-        declarations,
-    })
+    Ok(ModuleSymbols { declarations })
 }
 
-unsafe fn insert_symbol(
-    value: LLVMValueRef,
-    definitions: &mut BTreeSet<String>,
-    linkable_definitions: &mut BTreeSet<String>,
-    declarations: &mut BTreeSet<String>,
-) {
+unsafe fn insert_symbol(value: LLVMValueRef, declarations: &mut BTreeSet<String>) {
     let mut length = 0usize;
     let name = LLVMGetValueName2(value, &mut length);
     if name.is_null() || length == 0 {
@@ -376,18 +345,5 @@ unsafe fn insert_symbol(
         String::from_utf8_lossy(std::slice::from_raw_parts(name.cast::<u8>(), length)).into_owned();
     if LLVMIsDeclaration(value) != 0 {
         declarations.insert(name);
-    } else {
-        let linkage = LLVMGetLinkage(value);
-        if matches!(
-            linkage,
-            LLVMLinkage::LLVMExternalLinkage
-                | LLVMLinkage::LLVMLinkOnceAnyLinkage
-                | LLVMLinkage::LLVMLinkOnceODRLinkage
-                | LLVMLinkage::LLVMWeakAnyLinkage
-                | LLVMLinkage::LLVMWeakODRLinkage
-        ) {
-            linkable_definitions.insert(name.clone());
-        }
-        definitions.insert(name);
     }
 }

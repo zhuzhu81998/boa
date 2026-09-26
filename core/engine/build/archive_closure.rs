@@ -27,13 +27,6 @@ enum Target {
 }
 
 #[derive(Clone)]
-enum Classification {
-    Copy(SectionRef),
-    External(String),
-    Reject(String),
-}
-
-#[derive(Clone)]
 struct Reloc {
     offset: u32,
     addend: i64,
@@ -89,7 +82,6 @@ pub(super) fn generate(
     let boa_file = archive.file(boa_member)?;
     let roots = handler_roots(&archive, &boa_file, table, opcode_count)?;
     let stencils = extract_stencils(&archive, &boa_file, &roots)?;
-    let mut externalized = BTreeSet::new();
     let mut external_names = BTreeSet::new();
     let mut closure_by_id = BTreeMap::new();
     let mut supported = BTreeSet::new();
@@ -101,22 +93,17 @@ pub(super) fn generate(
             );
             continue;
         }
-        let mut opcode_externalized = BTreeSet::new();
         let mut opcode_externals = BTreeSet::new();
-        let mut classifications = BTreeMap::new();
         match collect_closure(
             &archive,
-            std::slice::from_ref(stencil),
-            &mut opcode_externalized,
+            stencil,
             &mut opcode_externals,
-            &mut classifications,
             boa_member,
             &module_symbols,
             &boa_file,
         ) {
             Ok(sections) => {
                 supported.insert(opcode);
-                externalized.extend(opcode_externalized);
                 external_names.extend(opcode_externals);
                 for section in sections {
                     closure_by_id.entry(section.id).or_insert(section);
@@ -161,15 +148,7 @@ pub(super) fn generate(
         .collect();
     llvm_resolver::generate(runtime_ir, &names, &out)?;
     fs::write(out.join("jit_runtime_holes.txt"), names.join("\n")).map_err(|e| e.to_string())?;
-    emit_metadata(
-        &archive,
-        &stencils,
-        &closure,
-        &externalized,
-        &external,
-        &supported,
-        &out,
-    )?;
+    emit_metadata(&archive, &stencils, &closure, &external, &supported, &out)?;
 
     Ok(Generated {
         members: archive.member_count(),
@@ -294,29 +273,28 @@ fn extract_stencils(
 
 fn collect_closure(
     archive: &TemplateArchive,
-    stencils: &[Stencil],
-    externalized: &mut BTreeSet<SymbolRef>,
+    stencil: &Stencil,
     external_names: &mut BTreeSet<String>,
-    classifications: &mut BTreeMap<SymbolRef, Classification>,
     boa_member: super::template_archive::MemberId,
     module_symbols: &llvm_resolver::ModuleSymbols,
     boa_file: &object::File<'_>,
 ) -> Result<Vec<ClosureSection>, String> {
     let mut pending = VecDeque::new();
-    for stencil in stencils {
-        for relocation in &stencil.relocations {
-            queue_target(
-                archive,
-                &relocation.target,
-                &mut pending,
-                externalized,
-                external_names,
-                classifications,
-                boa_member,
-                module_symbols,
-                boa_file,
-            )?;
-        }
+    let root_section = boa_file
+        .symbol_by_index(stencil.root.symbol)
+        .map_err(|e| e.to_string())?
+        .section_index()
+        .ok_or("handler without section")?;
+    for relocation in &stencil.relocations {
+        queue_target(
+            &relocation.target,
+            &mut pending,
+            external_names,
+            root_section,
+            boa_member,
+            module_symbols,
+            boa_file,
+        )?;
     }
     let mut seen = BTreeSet::new();
     let mut closure = Vec::new();
@@ -339,12 +317,10 @@ fn collect_closure(
             let parsed =
                 read_relocation(archive, &file, id.member, offset as usize, relocation, name)?;
             queue_target(
-                archive,
                 &parsed.target,
                 &mut pending,
-                externalized,
                 external_names,
-                classifications,
+                root_section,
                 boa_member,
                 module_symbols,
                 boa_file,
@@ -365,12 +341,10 @@ fn collect_closure(
 }
 
 fn queue_target(
-    archive: &TemplateArchive,
     target: &Target,
     pending: &mut VecDeque<SectionRef>,
-    externalized: &mut BTreeSet<SymbolRef>,
     external_names: &mut BTreeSet<String>,
-    classifications: &mut BTreeMap<SymbolRef, Classification>,
+    root_section: object::SectionIndex,
     boa_member: super::template_archive::MemberId,
     module_symbols: &llvm_resolver::ModuleSymbols,
     boa_file: &object::File<'_>,
@@ -390,55 +364,8 @@ fn queue_target(
         external_names.insert(name.clone());
         return Ok(());
     };
-    let classification = classify_symbol(
-        archive,
-        *target,
-        classifications,
-        &mut BTreeSet::new(),
-        boa_member,
-        module_symbols,
-        boa_file,
-    )?;
-    match classification {
-        Classification::Copy(section) => pending.push_back(section),
-        Classification::External(name) => {
-            externalized.insert(*target);
-            external_names.insert(name);
-        }
-        Classification::Reject(error) => return Err(error),
-    }
-    Ok(())
-}
-
-fn classify_symbol(
-    archive: &TemplateArchive,
-    target: SymbolRef,
-    classifications: &mut BTreeMap<SymbolRef, Classification>,
-    visiting: &mut BTreeSet<SymbolRef>,
-    boa_member: super::template_archive::MemberId,
-    module_symbols: &llvm_resolver::ModuleSymbols,
-    boa_file: &object::File<'_>,
-) -> Result<Classification, String> {
-    if let Some(classification) = classifications.get(&target) {
-        return Ok(classification.clone());
-    }
     if target.member != boa_member {
-        let file = archive.file(target.member)?;
-        let symbol = file
-            .symbol_by_index(target.symbol)
-            .map_err(|e| e.to_string())?;
-        let name = symbol.name().map_err(|e| e.to_string())?;
-        if name.is_empty() {
-            return Err("cross-module target has no linker name".into());
-        }
-        if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
-            return Err(format!(
-                "cross-module symbol {name:?} has no typed declaration in boa_engine.ll"
-            ));
-        }
-        let classification = Classification::External(name.to_owned());
-        classifications.insert(target, classification.clone());
-        return Ok(classification);
+        return Err("dependency section escaped LLVM module boundary".into());
     }
     let file = boa_file;
     let symbol = file
@@ -454,57 +381,17 @@ fn classify_symbol(
         member: target.member,
         section: section_index.0,
     };
-    if !visiting.insert(target) {
-        return Ok(Classification::Copy(id));
+    // LLVM lowering has already turned helper calls into holes. The only code
+    // dependency allowed here is a jump-table reference back into this handler.
+    if section.kind() == SectionKind::Text && section_index != root_section {
+        return Err(format!(
+            "unexpected code dependency {:?}; helper references must be LLVM holes",
+            symbol.name().unwrap_or("<unnamed>")
+        ));
     }
-    let result: Result<Classification, String> = (|| {
-        validate_section(&section)?;
-        for (_, relocation) in section.relocations() {
-            validate_relocation(&relocation)?;
-            let RelocationTarget::Symbol(index) = relocation.target() else {
-                return Err("non-symbol relocation in closure".into());
-            };
-            if let ResolvedSymbol::Defined(dependency) =
-                archive.resolve_in(target.member, &file, index)?
-            {
-                if let Classification::Reject(error) = classify_symbol(
-                    archive,
-                    dependency,
-                    classifications,
-                    visiting,
-                    boa_member,
-                    module_symbols,
-                    boa_file,
-                )? {
-                    return Err(error);
-                }
-            }
-        }
-        Ok(Classification::Copy(id))
-    })();
-    visiting.remove(&target);
-    let classification = match result {
-        Ok(classification) => classification,
-        Err(error) => {
-            let name = symbol.name().map_err(|e| e.to_string())?;
-            if section.kind() != SectionKind::Text
-                || !symbol.is_global()
-                || name.is_empty()
-                || !(module_symbols.is_linkable_definition(name)
-                    || module_symbols.is_declaration(name))
-            {
-                Classification::Reject(format!(
-                    "cannot externalize non-global target {name:?} in section {:?} ({:?}): {error}",
-                    section.name().unwrap_or("<unnamed>"),
-                    section.kind()
-                ))
-            } else {
-                Classification::External(name.to_owned())
-            }
-        }
-    };
-    classifications.insert(target, classification.clone());
-    Ok(classification)
+    validate_section(&section)?;
+    pending.push_back(id);
+    Ok(())
 }
 
 fn read_relocation(
@@ -644,21 +531,11 @@ fn internal_offset(
 fn target_expr(
     archive: &TemplateArchive,
     closure: &[ClosureSection],
-    externalized: &BTreeSet<SymbolRef>,
     external: &BTreeMap<String, usize>,
     target: &Target,
 ) -> Result<String, String> {
     let name = match target {
         Target::External(name) => Some(name.as_str()),
-        Target::Internal(symbol) if externalized.contains(symbol) => {
-            let file = archive.file(symbol.member)?;
-            Some(
-                file.symbol_by_index(symbol.symbol)
-                    .map_err(|e| e.to_string())?
-                    .name()
-                    .map_err(|e| e.to_string())?,
-            )
-        }
         Target::Internal(symbol) => {
             return Ok(format!(
                 "RelocationTarget::Internal({})",
@@ -693,7 +570,6 @@ fn emit_metadata(
     archive: &TemplateArchive,
     stencils: &[Stencil],
     closure: &[ClosureSection],
-    externalized: &BTreeSet<SymbolRef>,
     external: &BTreeMap<String, usize>,
     supported: &BTreeSet<usize>,
     out: &Path,
@@ -742,7 +618,7 @@ fn emit_metadata(
                 .relocations
                 .iter()
                 .filter_map(|r| match r.target {
-                    Target::Internal(symbol) if !externalized.contains(&symbol) => Some(symbol),
+                    Target::Internal(symbol) => Some(symbol),
                     _ => None,
                 })
                 .collect();
@@ -788,8 +664,7 @@ fn emit_metadata(
         ));
         for section in &bundle {
             for relocation in &section.relocations {
-                let target =
-                    target_expr(archive, &bundle, externalized, external, &relocation.target)?;
+                let target = target_expr(archive, &bundle, external, &relocation.target)?;
                 generated.push_str(&format!(
                 "    StencilRelocation {{ offset: {}, addend: {}, size: {}, kind: RelocationKind::{}, target: {target} }},\n",
                 section.blob_offset + relocation.offset as usize,
