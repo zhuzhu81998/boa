@@ -25,6 +25,22 @@ For build-only use `./tools/jit-run.sh --build-only`.
 The resulting executable is `target/jit-cli/release/boa`; do not confuse it with an older
 interpreter-only `target/release/boa`. Set `BOA_JIT_TRACE=1` to see native-chain entries.
 
+Other workspace binaries use the same driver, with their own default dependency features:
+
+```sh
+./tools/jit-run.sh -p boa_tester -- run --suite test/language/expressions -v
+./tools/jit-run.sh --build-only -p boa_tester
+# For packages whose binary name differs, add --bin BINARY.
+```
+
+Use `--` to separate driver options from program arguments. Non-default targets are built in
+`target/jit-packages/PACKAGE/BINARY`, keeping their templates separate from the CLI template.
+For example, the tester executable is
+`target/jit-packages/boa_tester/boa_tester/release/boa_tester`.
+Set `BOA_JIT_DISABLE=1` to compare interpreter execution using that same binary.
+The tester also uses `panic=abort`: a Rust panic terminates the process instead of being caught
+as an individual test failure. JavaScript exceptions are unaffected.
+
 Compare both execution modes with the same executable (build before timing):
 
 ```sh
