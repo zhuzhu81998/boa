@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "boa_jit_linker"
-version = "1.0.0-dev"
+version = "0.22.0"
 dependencies = [
  "llvm-sys",
  "object",
