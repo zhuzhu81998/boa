@@ -27,9 +27,7 @@ pub(super) fn generate(ir: &Path, names: &[String], out: &Path) -> Result<PathBu
 /// matched across two independent rustc compilations.
 pub(super) fn emit_template_object(ir: &Path, out: &Path) -> Result<PathBuf, String> {
     let object = out.join("boa_jit_template.o");
-    let llc = std::env::var_os("LLVM_LLC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-22/bin/llc"));
+    let llc = super::llvm_tools::tool("LLVM_LLC", "llc")?;
     let output = Command::new(&llc)
         .arg("--filetype=obj")
         .arg("--relocation-model=pic")
@@ -191,9 +189,7 @@ unsafe fn generate_in_context(
 }
 
 fn archive_object(object: &Path, archive: &Path) -> Result<(), String> {
-    let ar = std::env::var_os("LLVM_AR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/usr/lib/llvm-22/bin/llvm-ar"));
+    let ar = super::llvm_tools::tool("LLVM_AR", "llvm-ar")?;
     let status = Command::new(&ar)
         .arg("crs")
         .arg(archive)

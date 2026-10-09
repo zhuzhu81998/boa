@@ -47,8 +47,22 @@ fn run(mut args: Vec<OsString>) -> Result<u8, String> {
     // rustc's ordinary Unix linker arguments are direct arguments, not shell commands.
     // Fail explicitly for JIT response-file links until their driver-specific syntax is supported.
     let jit = args.iter().any(|arg| arg == "-lboa_jit_resolver");
-    let linker =
-        env::var_os("BOA_JIT_REAL_LINKER").unwrap_or_else(|| "/usr/lib/llvm-22/bin/clang".into());
+    let linker = boa_jit_llvm::tool("BOA_JIT_REAL_LINKER", "cc")?;
+    if prepare.is_none()
+        && !args
+            .iter()
+            .any(|arg| arg.to_string_lossy().starts_with("-fuse-ld="))
+    {
+        let lld = boa_jit_llvm::tool("BOA_JIT_LLD", "ld.lld")?;
+        // GCC accepts a linker name, rather than Clang's absolute -fuse-ld path.
+        // Both drivers use -B to search Rust's gcc-ld directory for ld.lld.
+        let directory = lld.parent().ok_or("bundled LLD has no parent directory")?;
+        if lld.file_name().is_none_or(|name| name != "ld.lld") {
+            return Err("BOA_JIT_LLD must point to a file named ld.lld".into());
+        }
+        args.insert(0, format!("-B{}/", directory.display()).into());
+        args.push("-fuse-ld=lld".into());
+    }
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     if jit && prepare.is_none() && env::var_os("BOA_JIT_RESOLVER_PREPARED").is_some() {
         // The compiler wrapper already injected the table into the engine archive. A missing
@@ -137,9 +151,7 @@ fn run(mut args: Vec<OsString>) -> Result<u8, String> {
                 fs::create_dir(&dir).map_err(|e| e.to_string())?;
                 let dest = dir.join("runtime.a");
                 fs::write(&dest, bytes).map_err(|e| e.to_string())?;
-                let mut command = Command::new(
-                    env::var_os("LLVM_AR").unwrap_or_else(|| "/usr/lib/llvm-22/bin/llvm-ar".into()),
-                );
+                let mut command = Command::new(boa_jit_llvm::tool("LLVM_AR", "llvm-ar")?);
                 command.arg("rs").arg(&dest);
                 for (name, output) in replacements {
                     let member = dir.join(name);

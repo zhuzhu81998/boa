@@ -1,4 +1,5 @@
-//! These integration tests require the LLVM 22 tools used by the experimental JIT.
+//! These integration tests use Rust's bundled LLVM preview tools.
+
 use std::{fs, path::Path, process::Command};
 
 const RUNTIME: &str = r#"
@@ -27,7 +28,7 @@ declare i32 @private_drop()
 "#;
 
 fn tool(name: &str) -> Command {
-    Command::new(format!("/usr/lib/llvm-22/bin/{name}"))
+    Command::new(boa_jit_llvm::tool(&name.replace('-', "_").to_uppercase(), name).unwrap())
 }
 
 fn assemble(dir: &Path, name: &str, ir: &str) -> std::path::PathBuf {
@@ -87,7 +88,6 @@ fn check_link_ir(archive: bool, runtime_ir: &str, request_ir: &str) {
         .arg("-L")
         .arg(dir.path())
         .arg("-lboa_jit_resolver")
-        .arg("-fuse-ld=lld")
         .arg("-o")
         .arg(&executable)
         .output()
@@ -166,7 +166,6 @@ fn missing_private_function_is_rejected() {
         .arg("-L")
         .arg(dir.path())
         .arg("-lboa_jit_resolver")
-        .arg("-fuse-ld=lld")
         .arg("-o")
         .arg(dir.path().join("program"))
         .output()

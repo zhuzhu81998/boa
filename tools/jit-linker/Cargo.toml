@@ -6,7 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+boa_jit_llvm.workspace = true
 llvm-sys.workspace = true
 object.workspace = true
 tempfile = "3"
 
+[build-dependencies]
+boa_jit_llvm.workspace = true

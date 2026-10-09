@@ -8,14 +8,26 @@ it is removed from the final link after the table has been inserted.
 Build the tool before selecting it as a linker:
 
 ```sh
-LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 cargo build -p boa_jit_linker
+cargo build -p boa_jit_linker
 ```
 
 Follow the engine JIT README to generate a matching canonical template and enable linker-plugin
-LTO. In the final runtime build, replace `-Clinker=/usr/lib/llvm-22/bin/clang` with
-`-Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker`. Keep `-Clink-arg=-fuse-ld=lld`.
-`BOA_JIT_REAL_LINKER` overrides the default `/usr/lib/llvm-22/bin/clang`; it must name the real
-driver, not this wrapper. `LLVM_AR` overrides `/usr/lib/llvm-22/bin/llvm-ar`.
+LTO. In the final runtime build, use
+`-Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker`.
+The wrapper selects Rust's bundled LLD unless a `-fuse-ld=` argument is already present.
+
+The checkout pins Rust 1.99.0 with `llvm-tools-preview`. `boa_jit_llvm` links the bundled LLVM
+library while `llvm-sys` remains the Rust C API bindings. No `llvm-config`, LLVM development
+package, or `LLVM_SYS_*_PREFIX` is required. Cargo checks that rustc's LLVM major/minor match
+the bindings, and the wrapper embeds a runtime search path to the pinned sysroot library.
+This bundled integration currently supports Linux hosts.
+
+`llvm-ar` and the other IR tools come from the preview component. The real driver defaults to
+system `cc` (GCC or Clang); it forwards inputs to bundled LLD with
+`-B<bundled-directory>/ -fuse-ld=lld`, so its own LLVM version does not have to match. `BOA_JIT_REAL_LINKER`, `LLVM_AR`, and `BOA_JIT_LLD` override the respective defaults.
+The real linker override must name the driver, not this wrapper. `BOA_JIT_LLD` must name an
+`ld.lld` executable. LLVM tool overrides must
+remain compatible with rustc's LLVM version. Use `./tools/jit-run.sh` for the complete build.
 
 Links without `-lboa_jit_resolver` pass through to the real driver. For JIT links the wrapper
 examines bitcode objects and archive members, finds the single module defining

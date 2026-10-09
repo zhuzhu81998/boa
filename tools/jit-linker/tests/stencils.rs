@@ -1,6 +1,3 @@
-#[path = "../../../core/engine/build/llvm_stencils.rs"]
-mod llvm_stencils;
-
 use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SymbolKind, SymbolSection};
 use std::{fs, process::Command};
 
@@ -20,13 +17,13 @@ define ptr @handler() {
 "#,
     )
     .unwrap();
-    let holes = llvm_stencils::lower(&input, &output).unwrap();
+    let holes = boa_jit_llvm::lower_stencils(&input, &output).unwrap();
     let hole = holes
         .iter()
         .find(|(_, name)| name.as_str() == "vtable")
         .unwrap()
         .0;
-    let disassembly = Command::new("/usr/lib/llvm-22/bin/llvm-dis")
+    let disassembly = Command::new(boa_jit_llvm::tool("LLVM_DIS", "llvm-dis").unwrap())
         .arg(output)
         .args(["-o", "-"])
         .output()
@@ -57,14 +54,14 @@ define i32 @handler() {
   ret i32 %v
 }
 "#).unwrap();
-    let holes = llvm_stencils::lower(&input, &output).unwrap();
+    let holes = boa_jit_llvm::lower_stencils(&input, &output).unwrap();
     let hole = holes
         .iter()
         .find(|(_, name)| name.as_str() == "private_drop")
         .unwrap()
         .0;
     let native = dir.path().join("stencil.o");
-    let result = Command::new("/usr/lib/llvm-22/bin/llc")
+    let result = Command::new(boa_jit_llvm::tool("LLVM_LLC", "llc").unwrap())
         .args([
             "--filetype=obj",
             "--function-sections",
@@ -107,4 +104,65 @@ define i32 @handler() {
     let symbol = file.symbol_by_index(index).unwrap();
     assert_eq!(symbol.name().unwrap(), hole);
     assert_eq!(symbol.section(), SymbolSection::Undefined);
+}
+
+const TAIL_RUNTIME: &str = r#"
+@BOA_JIT_TEMPLATE_HANDLERS = constant <{ ptr }> <{ ptr @handler }>
+declare void @boa_jit_tail(ptr, ptr, i64, ptr, ptr)
+declare void @boa_jit_next(ptr, i64, ptr, ptr)
+declare void @llvm.lifetime.end.p0(ptr)
+define void @handler(ptr %context, i64 %pc, ptr %chain, ptr %output) {
+entry:
+  %local = alloca i8
+  %fallback = icmp eq ptr %context, null
+  br i1 %fallback, label %return, label %transfer
+transfer:
+  call void @boa_jit_next(ptr %context, i64 %pc, ptr %chain, ptr %output)
+  br label %return
+return:
+  call void @llvm.lifetime.end.p0(ptr %local)
+  ret void
+}
+"#;
+
+#[test]
+fn continuation_accepts_lifetime_end_in_shared_return_block() {
+    check_tail_lifetime(TAIL_RUNTIME);
+}
+
+#[test]
+fn continuation_accepts_lifetime_end_before_immediate_return() {
+    let runtime = TAIL_RUNTIME
+        .replace("  br label %return\nreturn:\n", "")
+        .replace("  %fallback = icmp eq ptr %context, null\n  br i1 %fallback, label %return, label %transfer", "  br label %transfer");
+    check_tail_lifetime(&runtime);
+}
+
+fn check_tail_lifetime(runtime: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("runtime.ll");
+    let output = dir.path().join("shallow.bc");
+    fs::write(&input, runtime).unwrap();
+    boa_jit_llvm::lower_stencils(&input, &output).unwrap();
+    let disassembly = Command::new(boa_jit_llvm::tool("LLVM_DIS", "llvm-dis").unwrap())
+        .arg(output)
+        .args(["-o", "-"])
+        .output()
+        .unwrap();
+    assert!(disassembly.status.success());
+    let ir = String::from_utf8(disassembly.stdout).unwrap();
+    assert!(ir.contains("musttail call void @BOA_JIT_CONST_6"), "{ir}");
+}
+
+#[test]
+fn continuation_rejects_real_cleanup_after_lifetime_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("runtime.ll");
+    let output = dir.path().join("shallow.bc");
+    let runtime = TAIL_RUNTIME
+        .replace("define void @handler", "declare void @cleanup(ptr)\ndefine void @handler")
+        .replace("  ret void", "  call void @cleanup(ptr %output)\n  ret void");
+    fs::write(&input, runtime).unwrap();
+    let error = boa_jit_llvm::lower_stencils(&input, &output).unwrap_err();
+    assert!(error.contains("nontrivial cleanup after marker"), "{error}");
 }

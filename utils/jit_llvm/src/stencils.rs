@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Numbered stencil symbols map to exact values in the original runtime IR.
-pub(crate) fn lower(input: &Path, output: &Path) -> Result<BTreeMap<String, String>, String> {
+pub fn lower(input: &Path, output: &Path) -> Result<BTreeMap<String, String>, String> {
     unsafe {
         let context = LLVMContextCreate();
         let result = lower_inner(context, input, output);
@@ -214,7 +214,8 @@ unsafe fn lower_constants(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Res
 }
 
 /// Turn the source marker into a stack-neutral transfer. Never discard cleanup code to force
-/// a tail call: accept only an immediate return or a branch to a bare return block.
+/// a tail call: accept only a void return (possibly through a branch) with lifetime-end
+/// annotations. Those annotations do not execute cleanup; the tail transfer ends this frame.
 unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Result<(), String> {
     let marker = LLVMGetNamedFunction(module, c"boa_jit_tail".as_ptr());
     let next_marker = LLVMGetNamedFunction(module, c"boa_jit_next".as_ptr());
@@ -234,14 +235,24 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
                 {
                     let first_argument = u32::from(LLVMGetCalledValue(instruction) == marker);
                     let next = LLVMGetNextInstruction(instruction);
-                    let return_block = if !next.is_null()
-                        && !LLVMIsABranchInst(next).is_null()
-                        && LLVMGetNumSuccessors(next) == 1
+                    let mut return_block = if !next.is_null()
+                        && !LLVMIsAUncondBrInst(next).is_null()
                     {
                         LLVMGetFirstInstruction(LLVMGetSuccessor(next, 0))
                     } else {
                         next
                     };
+                    // rustc may keep the result alloca's lifetime end in a shared epilogue,
+                    // even after Continue has been consumed before the source marker.
+                    while !return_block.is_null() && !LLVMIsACallInst(return_block).is_null() {
+                        let callee = LLVMGetCalledValue(return_block);
+                        if LLVMIsAFunction(callee).is_null()
+                            || !value_name(callee)?.starts_with("llvm.lifetime.end.")
+                        {
+                            break;
+                        }
+                        return_block = LLVMGetNextInstruction(return_block);
+                    }
                     if return_block.is_null()
                         || LLVMIsAReturnInst(return_block).is_null()
                         || LLVMGetNumOperands(return_block) != 0
@@ -271,7 +282,7 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
                             );
                         }
                     }
-                    calls.push((function, instruction, next, first_argument));
+                    calls.push((function, instruction, first_argument));
                 }
                 instruction = LLVMGetNextInstruction(instruction);
             }
@@ -279,7 +290,7 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
         }
     }
     let builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(module));
-    for (function, old, terminator, first_argument) in calls {
+    for (function, old, first_argument) in calls {
         let target = if first_argument == 1 {
             LLVMGetOperand(old, 0)
         } else {
@@ -305,8 +316,15 @@ unsafe fn lower_tail_calls(module: LLVMModuleRef, roots: &BTreeSet<usize>) -> Re
         LLVMSetInstructionCallConv(call, LLVMGetFunctionCallConv(function));
         LLVMSetTailCallKind(call, llvm_sys::LLVMTailCallKind::LLVMTailCallKindMustTail);
         LLVMBuildRetVoid(builder);
+        // Remove only the old call's block suffix. A shared return block keeps its
+        // lifetime annotations for other paths; this path now returns after musttail.
+        let mut suffix = LLVMGetNextInstruction(old);
+        while !suffix.is_null() {
+            let next = LLVMGetNextInstruction(suffix);
+            LLVMInstructionEraseFromParent(suffix);
+            suffix = next;
+        }
         LLVMInstructionEraseFromParent(old);
-        LLVMInstructionEraseFromParent(terminator);
     }
     LLVMDisposeBuilder(builder);
     Ok(())

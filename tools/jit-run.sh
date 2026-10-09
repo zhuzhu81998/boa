@@ -84,14 +84,51 @@ mkdir -p "$build_dir"
 exec 9>"$build_dir/driver.lock"
 flock 9
 
+# Use the same LLVM library/tools as the compiler that produces our bitcode.
+rustc_info=$(cd "$repo" && "${RUSTC:-rustc}" -vV)
+rustc_llvm=$(sed -n 's/^LLVM version: //p' <<< "$rustc_info")
+llvm_major=${rustc_llvm%%.*}
+rustc_host=$(sed -n 's/^host: //p' <<< "$rustc_info")
+[[ $llvm_major =~ ^[0-9]+$ && -n $rustc_host ]] || { echo 'rustc did not report its LLVM version/host' >&2; exit 1; }
+bindings_version=$(sed -nE 's/^llvm-sys = .*version = "([0-9]+)\.[^"]*".*/\1/p' "$repo/Cargo.toml")
+llvm_minor=${rustc_llvm#*.}
+llvm_minor=${llvm_minor%%.*}
+if [[ ! $bindings_version =~ ^[0-9]+$ || ! $llvm_minor =~ ^[0-9]+$ || $bindings_version != $((llvm_major * 10 + llvm_minor)) ]]; then
+    echo "rustc uses LLVM $rustc_llvm; update the workspace llvm-sys dependency to match before building the JIT" >&2
+    exit 1
+fi
+rust_sysroot=$(cd "$repo" && "${RUSTC:-rustc}" --print sysroot)
+llvm_bindir="$rust_sysroot/lib/rustlib/$rustc_host/bin"
+export LLVM_LLC=${LLVM_LLC:-$llvm_bindir/llc}
+export LLVM_AR=${LLVM_AR:-$llvm_bindir/llvm-ar}
+# A system C compiler driver forwards bitcode to bundled LLD.
+export BOA_JIT_REAL_LINKER=${BOA_JIT_REAL_LINKER:-cc}
+export BOA_JIT_LLD=${BOA_JIT_LLD:-$llvm_bindir/gcc-ld/ld.lld}
+llvm_lld=$BOA_JIT_LLD
+for llvm_tool in "$LLVM_LLC" "$LLVM_AR" "$llvm_lld"; do
+    if [[ ! -x $llvm_tool ]]; then
+        echo "Missing LLVM tool $llvm_tool; run rustup component add llvm-tools-preview" >&2
+        exit 1
+    fi
+    tool_version=$("$llvm_tool" --version) || exit 1
+    if [[ ! $tool_version =~ ([Vv]ersion[[:space:]]+|LLD[[:space:]]+)([0-9]+)\. || ${BASH_REMATCH[2]} != "$llvm_major" ]]; then
+        echo "$llvm_tool must match rustc's LLVM $rustc_llvm" >&2
+        exit 1
+    fi
+done
+command -v "$BOA_JIT_REAL_LINKER" >/dev/null || {
+    echo "Install a C compiler driver (GCC or Clang) or set BOA_JIT_REAL_LINKER to one" >&2
+    exit 1
+}
+
 # Preserve the caller's directory for program arguments.
 fingerprint=$(
     cd "$repo"
     {
-        rustc -vV
-        printf '%s\n' "$package" "$bin"
+        printf '%s\n' "$rustc_info" "$package" "$bin" "$rust_sysroot" \
+            "$LLVM_LLC" "$LLVM_AR" "$BOA_JIT_REAL_LINKER" "$llvm_lld"
         git ls-files --cached --others --exclude-standard -z -- \
-            core cli tests tools utils examples .cargo Cargo.toml Cargo.lock |
+            core cli tests tools utils examples .cargo Cargo.toml Cargo.lock rust-toolchain.toml |
             while IFS= read -r -d '' file; do
                 # Tracked files may have been deleted in the working tree.
                 if [[ -f $file ]]; then
@@ -112,7 +149,6 @@ if [[ ! -x $binary || ! -f $template || ! -f $stamp || $(<"$stamp") != "$fingerp
         unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER
         unset BOA_JIT_BUILD_TEMPLATE BOA_JIT_TEMPLATE_LLVM_IR BOA_JIT_REUSE_GENERATED
         unset BOA_JIT_RESOLVER_PREPARED
-        export LLVM_SYS_221_PREFIX=${LLVM_SYS_221_PREFIX:-/usr/lib/llvm-22}
         # Inherit release optimization, fat LTO, codegen units, and stripping.
 
         echo 'Building JIT linker wrapper...' >&2
@@ -125,7 +161,7 @@ if [[ ! -x $binary || ! -f $template || ! -f $stamp || $(<"$stamp") != "$fingerp
         export BOA_JIT_DRIVER_LINKER="$tool_dir/debug/boa_jit_linker"
         # Native JIT frames do not yet support Rust unwinding.
         flags=(-Cpanic=abort -Clinker-plugin-lto
-            "-Clinker=$tool_dir/debug/boa_jit_linker" -Clink-arg=-fuse-ld=lld
+            "-Clinker=$tool_dir/debug/boa_jit_linker"
             -Clink-arg=-Wl,--lto-O3)
         printf -v CARGO_ENCODED_RUSTFLAGS '%s\x1f' "${flags[@]}"
         export CARGO_ENCODED_RUSTFLAGS=${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}

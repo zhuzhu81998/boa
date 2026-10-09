@@ -7,8 +7,8 @@
 
 #[path = "build/llvm_resolver.rs"]
 mod llvm_resolver;
-#[path = "build/llvm_stencils.rs"]
-mod llvm_stencils;
+#[path = "build/llvm_tools.rs"]
+mod llvm_tools;
 #[path = "build/native_stencils.rs"]
 mod native_stencils;
 
@@ -52,6 +52,7 @@ fn main() {
     println!("cargo::rerun-if-env-changed=BOA_JIT_TEMPLATE_LLVM_IR");
     println!("cargo::rerun-if-env-changed=LLVM_LLC");
     println!("cargo::rerun-if-env-changed=LLVM_AR");
+    println!("cargo::rerun-if-changed=build/llvm_tools.rs");
     println!("cargo::rerun-if-env-changed=BOA_JIT_REUSE_GENERATED");
 
     if env::var_os("CARGO_FEATURE_JIT").is_none() {
@@ -72,6 +73,8 @@ fn main() {
         println!("cargo::warning=the baseline JIT is currently disabled outside x86-64 Unix");
         return;
     }
+    llvm_tools::configure()
+        .unwrap_or_else(|error| panic!("cannot configure JIT LLVM tools: {error}"));
     if env::var_os("BOA_JIT_BUILD_TEMPLATE").is_some() {
         return;
     }
@@ -88,9 +91,10 @@ fn main() {
     for bytes in [
         fs::read(&llvm_ir).expect("cannot read canonical LLVM module"),
         include_bytes!("build.rs").to_vec(),
-        include_bytes!("build/llvm_stencils.rs").to_vec(),
+        include_bytes!("../../utils/jit_llvm/src/stencils.rs").to_vec(),
         include_bytes!("build/llvm_resolver.rs").to_vec(),
         include_bytes!("build/native_stencils.rs").to_vec(),
+        include_bytes!("build/llvm_tools.rs").to_vec(),
     ] {
         for byte in bytes {
             generation_key = (generation_key ^ u64::from(byte)).wrapping_mul(0x100000001b3);
@@ -117,7 +121,7 @@ fn main() {
     }
 
     let shallow_ir = out.join("boa_jit_shallow.bc");
-    let holes = llvm_stencils::lower(&llvm_ir, &shallow_ir)
+    let holes = boa_jit_llvm::lower_stencils(&llvm_ir, &shallow_ir)
         .unwrap_or_else(|error| panic!("cannot create shallow JIT module: {error}"));
     let object_path = llvm_resolver::emit_template_object(&shallow_ir, &out)
         .unwrap_or_else(|error| panic!("cannot lower canonical JIT LLVM module: {error}"));

@@ -20,7 +20,26 @@ The driver does not enable `link-dead-code`. The remaining JIT-specific settings
 are linker-plugin bitcode/the linker wrapper and `panic=abort`: unwinding through generated
 frames is not supported yet. Thus these builds are comparable, but not compiler-flag-identical
 to the ordinary CLI.
-LLVM 22 must be installed. The driver uses Git to enumerate build inputs; ripgrep is not required.
+
+The checkout pins Rust 1.99.0 with `llvm-tools-preview`. Install the pinned components with:
+
+```sh
+rustup toolchain install 1.99.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+```
+
+The build links Rust's bundled LLVM library and uses the same distribution's `llc`, `llvm-ar`,
+and LLD. No external LLVM development package or `llvm-config` is needed. A system C compiler
+driver (`cc`, supplied by GCC or Clang) forwards linker inputs to bundled LLD and does not parse
+their LLVM IR. The wrapper selects LLD with `-B<bundled-directory>/ -fuse-ld=lld`, which both
+drivers support. `BOA_JIT_REAL_LINKER` overrides the driver.
+`LLVM_LLC`, `LLVM_AR`, and `BOA_JIT_LLD` override individual tools and must match the compiler's
+LLVM major; `BOA_JIT_LLD` must name an `ld.lld` executable. The driver uses Git to enumerate build inputs; ripgrep is not required.
+
+The workspace keeps `llvm-sys` 231.0.1 as the Rust C API bindings for LLVM 23.1, with automatic
+LLVM discovery/linking and target initialization wrappers disabled. Updating Rust requires
+checking its LLVM version against these bindings; both Cargo and the driver reject a mismatch.
+The bundled integration currently supports Linux hosts.
+
 For build-only use `./tools/jit-run.sh --build-only`.
 The resulting executable is `target/jit-cli/release/boa`; do not confuse it with an older
 interpreter-only `target/release/boa`. Set `BOA_JIT_TRACE=1` to see native-chain entries.
@@ -53,11 +72,34 @@ time BOA_JIT_DISABLE=1 taskset -c 1 target/jit-cli/release/boa navier-stokes.js
 Unset `BOA_JIT_TRACE` for timings. Both paths now share allocator, features, and build flags;
 the interpreter path is not necessarily identical to a separately built default CLI.
 
+## Bundled LLVM integration
+
+`utils/jit_llvm` links the engine build script and linker wrapper against the pinned compiler's
+`libLLVM-23-rust-1.99.0-stable.so`. That file is a linker script selecting Rust's actual LLVM shared
+library. The helper stages symlinks under Cargo's output directory so Cargo can load build-script
+executables, and the linker wrapper embeds a runtime search path for direct invocation.
+The preview tools are discovered under `lib/rustlib/<compiler-host>/bin`; LLD comes from
+`gcc-ld/ld.lld` there. The system `cc` remains the linker driver.
+
+Static inspection of the x86-64 Linux Rust 1.99.0 distribution found exports for all 119
+LLVM C API functions used by our transformations. The existing `llvm-sys` calls and IR
+transformations are retained, including parsing, symbol replacement, `musttail`, TLS handling,
+verification, and bitcode writing. The bundled layout and preview tool set are not a stable
+LLVM SDK contract, so review this integration when changing the Rust pin.
+
+To verify library linking, IR transformations, and an executable manually:
+
+```sh
+cargo test -p boa_jit_linker
+./tools/jit-run.sh simple-loop.js
+BOA_JIT_TRACE=1 ./tools/jit-run.sh simple-loop.js
+```
+
 The lower-level build steps below are for embedding and pipeline development.
 They use late resolver insertion with rustc-side LTO disabled. Use the automated driver above
 for fat LTO; it additionally prepares the engine archive before compiling the CLI.
 
-LLVM 22 development libraries and tools are required. The template and final engine must use the
+The pinned Rust distribution and its LLVM preview tools are required. The template and final engine must use the
 same checkout, Rust toolchain, target, features, panic mode, optimization level, and codegen
 settings. Rust externals are preserved and resolved by their exact mangled names.
 
@@ -68,14 +110,13 @@ unstable private Rust symbol hashes across independent native and LLVM-IR compil
 Build the pre-link wrapper first, before selecting it as the linker:
 
 ```sh
-LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 cargo build -p boa_jit_linker
+cargo build -p boa_jit_linker
 ```
 
 Generate the canonical LLVM module:
 
 ```sh
 CARGO_TARGET_DIR=/tmp/boa-jit-template-plugin-ir \
-LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 \
 BOA_JIT_BUILD_TEMPLATE=1 \
 CARGO_PROFILE_RELEASE_LTO=off \
 RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto" \
@@ -86,22 +127,22 @@ RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto" \
 Build or run Boa with linker-plugin LTO. Disable rustc-side fat LTO so
 linker-plugin mode leaves unmerged bitcode for LLVM's native linker. The pre-link wrapper inserts
 the helper address table into the runtime module before that link. Replace the wrapper path below
-with the absolute path to your checkout.
+with the absolute path to your checkout, and select Rust's bundled LLD.
 
 ```sh
 CARGO_TARGET_DIR=/tmp/boa-jit-runtime \
-LLVM_SYS_221_PREFIX=/usr/lib/llvm-22 \
 BOA_JIT_TEMPLATE_LLVM_IR=/tmp/boa-jit-template.ll \
 CARGO_PROFILE_RELEASE_LTO=off \
 RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto \
-  -Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker -Clink-arg=-fuse-ld=lld \
+  -Clinker=/absolute/path/to/boa/target/debug/boa_jit_linker \
   -Clink-arg=-Wl,--lto-O3" \
   cargo rustc --release -p boa_engine --features jit --lib --crate-type rlib
 ```
 
-The build script uses LLVM 22's `llc` to lower the canonical module into a
-function-sectioned native object for extraction. Set `LLVM_LLC` to override its default path
-under `/usr/lib/llvm-22/bin`. `LLVM_AR` selects the archiver used for the resolver request archive.
+The build script uses `llc` from Rust's preview component to lower the
+canonical module into a function-sectioned native object for extraction. `LLVM_LLC` overrides
+that tool; `LLVM_AR` overrides the archiver used for the resolver request archive. The linker
+wrapper defaults to the system `cc` driver and selects Rust's bundled LLD automatically.
 
 The rlib command builds the engine, not an executable. Final executable links must also use the
 wrapper and matching dependency features. When manually linking a smoke test, select the exact

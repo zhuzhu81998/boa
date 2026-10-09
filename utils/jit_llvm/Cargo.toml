@@ -1,0 +1,13 @@
+[package]
+name = "boa_jit_llvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+links = "boa_jit_llvm"
+
+[dependencies]
+llvm-sys.workspace = true
+
+[lints]
+workspace = true

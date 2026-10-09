@@ -50,6 +50,7 @@ boa_wintertc = { version = "~0.22.0", path = "core/wintertc" }
 # Utility Repo Crates
 tag_ptr = { version = "~0.1.0", path = "utils/tag_ptr" }
 small_btree = { version = "~0.1.0", path = "utils/small_btree" }
+boa_jit_llvm = { path = "utils/jit_llvm" }
 
 # Shared deps
 arbitrary = "1"
@@ -128,7 +129,7 @@ arrayvec = "0.7.8"
 intrusive-collections = "0.10.3"
 libc = "0.2.1"
 object = { version = "0.37.3", default-features = false, features = ["read_core", "archive", "elf"] }
-llvm-sys = { version = "221.0.1", default-features = false, features = ["prefer-dynamic"] }
+llvm-sys = { version = "231.0.1", default-features = false, features = ["no-llvm-linking", "disable-alltargets-init"] }
 cfg-if = "1.0.4"
 either = "1.18.0"
 sys-locale = "0.3.2"

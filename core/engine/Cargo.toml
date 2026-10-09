@@ -205,6 +205,7 @@ web-time = { workspace = true, optional = true }
 getrandom = { workspace = true, features = ["wasm_js"], optional = true }
 
 [build-dependencies]
+boa_jit_llvm.workspace = true
 object.workspace = true
 llvm-sys.workspace = true
 
