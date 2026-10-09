@@ -99,9 +99,9 @@ RUSTFLAGS="-Cpanic=abort -Clinker-plugin-lto \
   cargo rustc --release -p boa_engine --features jit --lib --crate-type rlib
 ```
 
-The build script uses LLVM 22's `llc` and `llvm-ar` to lower the canonical module into a
-function-sectioned native archive for extraction. Set `LLVM_LLC` or `LLVM_AR` to override their
-default paths under `/usr/lib/llvm-22/bin`.
+The build script uses LLVM 22's `llc` to lower the canonical module into a
+function-sectioned native object for extraction. Set `LLVM_LLC` to override its default path
+under `/usr/lib/llvm-22/bin`. `LLVM_AR` selects the archiver used for the resolver request archive.
 
 The rlib command builds the engine, not an executable. Final executable links must also use the
 wrapper and matching dependency features. When manually linking a smoke test, select the exact

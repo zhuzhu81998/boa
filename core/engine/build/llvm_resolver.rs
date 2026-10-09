@@ -21,11 +21,11 @@ pub(super) fn generate(ir: &Path, names: &[String], out: &Path) -> Result<PathBu
     unsafe { generate_inner(ir, names, out) }
 }
 
-/// Lowers the canonical LLVM module into the native archive used for stencil extraction.
+/// Lowers the canonical LLVM module into the native object used for stencil extraction.
 ///
 /// The resolver is generated from this same module, so private Rust symbol names never have to be
 /// matched across two independent rustc compilations.
-pub(super) fn emit_template_archive(ir: &Path, out: &Path) -> Result<PathBuf, String> {
+pub(super) fn emit_template_object(ir: &Path, out: &Path) -> Result<PathBuf, String> {
     let object = out.join("boa_jit_template.o");
     let llc = std::env::var_os("LLVM_LLC")
         .map(PathBuf::from)
@@ -50,9 +50,7 @@ pub(super) fn emit_template_archive(ir: &Path, out: &Path) -> Result<PathBuf, St
         ));
     }
 
-    let archive = out.join("libboa_jit_template.a");
-    archive_object(&object, &archive)?;
-    Ok(archive)
+    Ok(object)
 }
 
 unsafe fn generate_inner(ir: &Path, names: &[String], out: &Path) -> Result<PathBuf, String> {

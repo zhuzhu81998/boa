@@ -1,18 +1,16 @@
 //! Builds the actual opcode-handler stencil library for the baseline JIT.
 //!
-//! The canonical LLVM module is produced from this exact crate with `boa_jit_template_export`.
-//! This build script lowers that module into the native archive used for stencil extraction and
+//! The canonical LLVM module is produced from this exact crate with `BOA_JIT_BUILD_TEMPLATE`.
+//! This build script lowers that module into the native object used for stencil extraction and
 //! also uses it to generate the typed resolver. Using one module for both artifacts is important:
 //! private Rust symbol hashes are not stable across independent compilations.
 
-#[path = "build/archive_closure.rs"]
-mod archive_closure;
 #[path = "build/llvm_resolver.rs"]
 mod llvm_resolver;
 #[path = "build/llvm_stencils.rs"]
 mod llvm_stencils;
-#[path = "build/template_archive.rs"]
-mod template_archive;
+#[path = "build/native_stencils.rs"]
+mod native_stencils;
 
 use std::{env, fs, path::PathBuf};
 
@@ -92,8 +90,7 @@ fn main() {
         include_bytes!("build.rs").to_vec(),
         include_bytes!("build/llvm_stencils.rs").to_vec(),
         include_bytes!("build/llvm_resolver.rs").to_vec(),
-        include_bytes!("build/archive_closure.rs").to_vec(),
-        include_bytes!("build/template_archive.rs").to_vec(),
+        include_bytes!("build/native_stencils.rs").to_vec(),
     ] {
         for byte in bytes {
             generation_key = (generation_key ^ u64::from(byte)).wrapping_mul(0x100000001b3);
@@ -122,29 +119,30 @@ fn main() {
     let shallow_ir = out.join("boa_jit_shallow.bc");
     let holes = llvm_stencils::lower(&llvm_ir, &shallow_ir)
         .unwrap_or_else(|error| panic!("cannot create shallow JIT module: {error}"));
-    let archive_path = llvm_resolver::emit_template_archive(&shallow_ir, &out)
+    let object_path = llvm_resolver::emit_template_object(&shallow_ir, &out)
         .unwrap_or_else(|error| panic!("cannot lower canonical JIT LLVM module: {error}"));
-    let archive_data = fs::read(archive_path)
-        .unwrap_or_else(|error| panic!("cannot read generated JIT template archive: {error}"));
-    let template_fingerprint = template_archive::read_u64_symbol(&archive_data, CONFIG_SYMBOL)
+    let object_data = fs::read(object_path)
+        .unwrap_or_else(|error| panic!("cannot read generated JIT template object: {error}"));
+    let template = object::File::parse(object_data.as_slice())
+        .unwrap_or_else(|error| panic!("invalid JIT template object: {error}"));
+    let template_fingerprint = native_stencils::read_u64_symbol(&template, CONFIG_SYMBOL)
         .unwrap_or_else(|error| panic!("invalid JIT template configuration marker: {error}"));
     assert_eq!(
         template_fingerprint, config_fingerprint,
         "JIT template/runtime configuration mismatch (template {template_fingerprint:#018x}, runtime {config_fingerprint:#018x}). Rebuild the template module with the exact boa_engine features used by this target. Runtime configuration: {config_description}"
     );
 
-    let generated = archive_closure::generate(
-        &archive_data,
+    let generated = native_stencils::generate(
+        &template,
         HANDLER_TABLE,
         OPCODE_COUNT,
         &shallow_ir,
         &llvm_ir,
         &holes,
     )
-    .unwrap_or_else(|error| panic!("invalid archive closure: {error}"));
+    .unwrap_or_else(|error| panic!("invalid native stencils: {error}"));
     println!(
-        "cargo::warning=JIT archive generator: {} members, {} closure sections, {} bytes, {} relocations, {} externals, {} supported opcodes",
-        generated.members,
+        "cargo::warning=JIT stencil generator: {} bundle sections, {} bytes, {} relocations, {} externals, {} supported opcodes",
         generated.sections,
         generated.bytes,
         generated.relocations,

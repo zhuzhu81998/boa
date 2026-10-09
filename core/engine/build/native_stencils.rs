@@ -1,10 +1,7 @@
-use super::{
-    llvm_resolver,
-    template_archive::{ResolvedSymbol, SectionRef, SymbolRef, TemplateArchive},
-};
+use super::llvm_resolver;
 use object::{
     Object, ObjectSection, ObjectSymbol, RelocationEncoding, RelocationKind, RelocationTarget,
-    SectionKind,
+    SectionKind, SymbolIndex,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -22,7 +19,7 @@ enum Kind {
 
 #[derive(Clone)]
 enum Target {
-    Internal(SymbolRef),
+    Internal(SymbolIndex),
     External(String),
 }
 
@@ -36,16 +33,15 @@ struct Reloc {
 }
 
 struct Stencil {
-    root: SymbolRef,
+    root: SymbolIndex,
     name: String,
     bytes: Vec<u8>,
     relocations: Vec<Reloc>,
     unsupported: Option<String>,
 }
 
-#[derive(Clone)]
-struct ClosureSection {
-    id: SectionRef,
+struct BundleSection {
+    id: usize,
     address: u64,
     align: u64,
     blob_offset: usize,
@@ -53,8 +49,12 @@ struct ClosureSection {
     relocations: Vec<Reloc>,
 }
 
+struct StencilBundle {
+    sections: Vec<BundleSection>,
+    alignment: u64,
+}
+
 pub(super) struct Generated {
-    pub(super) members: usize,
     pub(super) sections: usize,
     pub(super) bytes: usize,
     pub(super) relocations: usize,
@@ -63,59 +63,41 @@ pub(super) struct Generated {
 }
 
 pub(super) fn generate(
-    data: &[u8],
+    file: &object::File<'_>,
     handler_table: &str,
     opcode_count: usize,
     llvm_ir: &Path,
     runtime_ir: &Path,
     holes: &BTreeMap<String, String>,
 ) -> Result<Generated, String> {
-    if !llvm_ir.is_file() {
-        return Err(format!("missing LLVM IR: {}", llvm_ir.display()));
-    }
-    let archive = TemplateArchive::parse(data)?;
-    let table = archive
-        .definition(handler_table)?
-        .ok_or("handler table absent from archive")?;
+    let table = file
+        .symbol_by_name(handler_table)
+        .ok_or("handler table absent from template object")?;
     let module_symbols = llvm_resolver::module_symbols(llvm_ir)?;
-    let boa_member = table.member;
-    let boa_file = archive.file(boa_member)?;
-    let roots = handler_roots(&archive, &boa_file, table, opcode_count)?;
-    let stencils = extract_stencils(&archive, &boa_file, &roots)?;
+    let roots = handler_roots(file, table.index(), opcode_count)?;
+    let stencils = extract_stencils(file, &roots)?;
     let mut external_names = BTreeSet::new();
-    let mut closure_by_id = BTreeMap::new();
-    let mut supported = BTreeSet::new();
+    let mut bundles = Vec::with_capacity(stencils.len());
     for (opcode, stencil) in stencils.iter().enumerate() {
-        if let Some(error) = &stencil.unsupported {
-            println!(
-                "cargo::warning=JIT opcode {opcode} ({}) unsupported: {error}",
-                stencil.name
-            );
-            continue;
-        }
         let mut opcode_externals = BTreeSet::new();
-        match collect_closure(
-            &archive,
-            stencil,
-            &mut opcode_externals,
-            boa_member,
-            &module_symbols,
-            &boa_file,
-        ) {
-            Ok(sections) => {
-                supported.insert(opcode);
+        let result = match &stencil.unsupported {
+            Some(error) => Err(error.clone()),
+            None => collect_bundle(file, stencil, &mut opcode_externals, &module_symbols),
+        };
+        match result {
+            Ok(bundle) => {
                 external_names.extend(opcode_externals);
-                for section in sections {
-                    closure_by_id.entry(section.id).or_insert(section);
-                }
+                bundles.push(Some(bundle));
             }
-            Err(error) => println!(
-                "cargo::warning=JIT opcode {opcode} ({}) unsupported: {error}",
-                stencil.name
-            ),
+            Err(error) => {
+                println!(
+                    "cargo::warning=JIT opcode {opcode} ({}) unsupported: {error}",
+                    stencil.name
+                );
+                bundles.push(None);
+            }
         }
     }
-    let closure: Vec<_> = closure_by_id.into_values().collect();
     let external: BTreeMap<String, usize> = external_names
         .into_iter()
         .enumerate()
@@ -128,34 +110,37 @@ pub(super) fn generate(
         .collect();
     llvm_resolver::generate(runtime_ir, &names, &out)?;
     fs::write(out.join("jit_runtime_holes.txt"), names.join("\n")).map_err(|e| e.to_string())?;
-    emit_metadata(&archive, &stencils, &closure, &external, &supported, &out)?;
+    emit_metadata(file, &stencils, &bundles, &external, &out)?;
 
     Ok(Generated {
-        members: archive.member_count(),
-        sections: closure.len(),
-        bytes: closure.iter().map(|section| section.bytes.len()).sum(),
-        relocations: stencils
+        sections: bundles
             .iter()
-            .map(|stencil| stencil.relocations.len())
-            .sum::<usize>()
-            + closure
-                .iter()
-                .map(|section| section.relocations.len())
-                .sum::<usize>(),
+            .flatten()
+            .map(|bundle| bundle.sections.len())
+            .sum(),
+        bytes: bundles
+            .iter()
+            .flatten()
+            .flat_map(|bundle| &bundle.sections)
+            .map(|section| section.bytes.len())
+            .sum(),
+        relocations: bundles
+            .iter()
+            .flatten()
+            .flat_map(|bundle| &bundle.sections)
+            .map(|section| section.relocations.len())
+            .sum(),
         externals: external.len(),
-        supported: supported.len(),
+        supported: bundles.iter().flatten().count(),
     })
 }
 
 fn handler_roots(
-    archive: &TemplateArchive,
     file: &object::File<'_>,
-    table: SymbolRef,
+    table: SymbolIndex,
     opcode_count: usize,
-) -> Result<Vec<SymbolRef>, String> {
-    let symbol = file
-        .symbol_by_index(table.symbol)
-        .map_err(|e| e.to_string())?;
+) -> Result<Vec<SymbolIndex>, String> {
+    let symbol = file.symbol_by_index(table).map_err(|e| e.to_string())?;
     let section_index = symbol
         .section_index()
         .ok_or("handler table has no section")?;
@@ -172,10 +157,14 @@ fn handler_roots(
         let RelocationTarget::Symbol(index) = relocation.target() else {
             return Err("non-symbol handler entry".into());
         };
-        match archive.resolve(table.member, index)? {
-            ResolvedSymbol::Defined(symbol) => roots.push((offset, symbol)),
-            ResolvedSymbol::External(name) => return Err(format!("handler {name:?} is undefined")),
+        let handler = file.symbol_by_index(index).map_err(|e| e.to_string())?;
+        if !handler.is_definition() {
+            return Err(format!(
+                "handler {:?} is undefined",
+                handler.name().unwrap_or("<unnamed>")
+            ));
         }
+        roots.push((offset, index));
     }
     roots.sort_by_key(|(offset, _)| *offset);
     if roots.len() != opcode_count {
@@ -188,18 +177,13 @@ fn handler_roots(
 }
 
 fn extract_stencils(
-    archive: &TemplateArchive,
-    boa_file: &object::File<'_>,
-    roots: &[SymbolRef],
+    file: &object::File<'_>,
+    roots: &[SymbolIndex],
 ) -> Result<Vec<Stencil>, String> {
     let mut stencils = Vec::with_capacity(roots.len());
     for &root in roots {
-        if root.member != roots[0].member {
-            return Err("opcode handlers span multiple LLVM modules".into());
-        }
-        let file = boa_file;
         let symbol = file
-            .symbol_by_index(root.symbol)
+            .symbol_by_index(root)
             .map_err(|e| e.to_string())?;
         let name = symbol.name().map_err(|e| e.to_string())?.to_owned();
         let section_index = symbol
@@ -225,14 +209,7 @@ fn extract_stencils(
             if !(start..end).contains(&offset) {
                 continue;
             }
-            match read_relocation(
-                archive,
-                &file,
-                root.member,
-                offset - start,
-                relocation,
-                &name,
-            ) {
+            match read_relocation(file, offset - start, relocation, &name) {
                 Ok(parsed) => relocations.push(parsed),
                 Err(error) => {
                     unsupported = Some(error);
@@ -251,63 +228,62 @@ fn extract_stencils(
     Ok(stencils)
 }
 
-fn collect_closure(
-    archive: &TemplateArchive,
+/// Keep native data and references back into the handler in this instruction's bundle.
+/// Runtime helpers have already become LLVM holes and must never be copied here.
+fn collect_bundle(
+    file: &object::File<'_>,
     stencil: &Stencil,
     external_names: &mut BTreeSet<String>,
-    boa_member: super::template_archive::MemberId,
     module_symbols: &llvm_resolver::ModuleSymbols,
-    boa_file: &object::File<'_>,
-) -> Result<Vec<ClosureSection>, String> {
+) -> Result<StencilBundle, String> {
+    let root = file
+        .symbol_by_index(stencil.root)
+        .map_err(|e| e.to_string())?;
+    let root_section = root.section_index().ok_or("handler without section")?;
+    let mut sections = vec![BundleSection {
+        id: root_section.0,
+        address: root.address(),
+        align: 16,
+        blob_offset: 0,
+        bytes: stencil.bytes.clone(),
+        relocations: stencil.relocations.clone(),
+    }];
     let mut pending = VecDeque::new();
-    let root_section = boa_file
-        .symbol_by_index(stencil.root.symbol)
-        .map_err(|e| e.to_string())?
-        .section_index()
-        .ok_or("handler without section")?;
+    let mut seen = BTreeSet::from([root_section.0]);
     for relocation in &stencil.relocations {
         queue_target(
+            file,
             &relocation.target,
             &mut pending,
             external_names,
             root_section,
-            boa_member,
             module_symbols,
-            boa_file,
         )?;
     }
-    let mut seen = BTreeSet::new();
-    let mut closure = Vec::new();
     while let Some(id) = pending.pop_front() {
         if !seen.insert(id) {
             continue;
         }
-        if id.member != boa_member {
-            return Err("dependency section escaped LLVM module boundary".into());
-        }
-        let file = boa_file;
         let section = file
-            .section_by_index(object::SectionIndex(id.section))
+            .section_by_index(object::SectionIndex(id))
             .map_err(|e| e.to_string())?;
         validate_section(&section)?;
         let name = section.name().unwrap_or("<unnamed>");
         let bytes = section.data().map_err(|e| format!("{name}: {e}"))?.to_vec();
         let mut relocations = Vec::new();
         for (offset, relocation) in section.relocations() {
-            let parsed =
-                read_relocation(archive, &file, id.member, offset as usize, relocation, name)?;
+            let parsed = read_relocation(file, offset as usize, relocation, name)?;
             queue_target(
+                file,
                 &parsed.target,
                 &mut pending,
                 external_names,
                 root_section,
-                boa_member,
                 module_symbols,
-                boa_file,
             )?;
             relocations.push(parsed);
         }
-        closure.push(ClosureSection {
+        sections.push(BundleSection {
             id,
             address: section.address(),
             align: section.align().max(1),
@@ -316,53 +292,63 @@ fn collect_closure(
             relocations,
         });
     }
-    closure.sort_by_key(|section| section.id);
-    Ok(closure)
+    layout_bundle(&mut sections)?;
+    let alignment = sections
+        .iter()
+        .map(|section| section.align)
+        .max()
+        .unwrap_or(16);
+    if alignment > 4096 {
+        return Err("stencil alignment exceeds executable page alignment".into());
+    }
+    // Validate internal offsets before accepting this opcode, rather than failing metadata
+    // generation for the entire table after the supported set has already been chosen.
+    for section in &sections {
+        for relocation in &section.relocations {
+            if let Target::Internal(symbol) = relocation.target {
+                internal_offset(file, &sections, symbol)?;
+            }
+        }
+    }
+    Ok(StencilBundle {
+        sections,
+        alignment,
+    })
 }
 
 fn queue_target(
+    file: &object::File<'_>,
     target: &Target,
-    pending: &mut VecDeque<SectionRef>,
+    pending: &mut VecDeque<usize>,
     external_names: &mut BTreeSet<String>,
     root_section: object::SectionIndex,
-    boa_member: super::template_archive::MemberId,
     module_symbols: &llvm_resolver::ModuleSymbols,
-    boa_file: &object::File<'_>,
 ) -> Result<(), String> {
-    let Target::Internal(target) = target else {
-        let Target::External(name) = target else {
-            unreachable!()
-        };
-        if name.starts_with("BOA_JIT_CONST_") {
+    let symbol = match target {
+        Target::External(name) => {
+            if let Some(slot) = name.strip_prefix("BOA_JIT_CONST_") {
+                let slot: usize = slot.parse().map_err(|_| "invalid constant slot")?;
+                if slot > 6 {
+                    return Err("invalid constant slot".into());
+                }
+                return Ok(());
+            }
+            if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
+                return Err(format!(
+                    "external symbol {name:?} has no typed declaration in boa_engine.ll"
+                ));
+            }
+            external_names.insert(name.clone());
             return Ok(());
         }
-        if !(module_symbols.is_declaration(name) || module_symbols.is_external_abi(name)) {
-            return Err(format!(
-                "external symbol {name:?} has no typed declaration in boa_engine.ll"
-            ));
-        }
-        external_names.insert(name.clone());
-        return Ok(());
+        Target::Internal(symbol) => file.symbol_by_index(*symbol).map_err(|e| e.to_string())?,
     };
-    if target.member != boa_member {
-        return Err("dependency section escaped LLVM module boundary".into());
-    }
-    let file = boa_file;
-    let symbol = file
-        .symbol_by_index(target.symbol)
-        .map_err(|e| e.to_string())?;
     let section_index = symbol
         .section_index()
         .ok_or("defined target without section")?;
     let section = file
         .section_by_index(section_index)
         .map_err(|e| e.to_string())?;
-    let id = SectionRef {
-        member: target.member,
-        section: section_index.0,
-    };
-    // LLVM lowering has already turned helper calls into holes. The only code
-    // dependency allowed here is a jump-table reference back into this handler.
     if section.kind() == SectionKind::Text && section_index != root_section {
         return Err(format!(
             "unexpected code dependency {:?}; helper references must be LLVM holes",
@@ -370,14 +356,12 @@ fn queue_target(
         ));
     }
     validate_section(&section)?;
-    pending.push_back(id);
+    pending.push_back(section_index.0);
     Ok(())
 }
 
 fn read_relocation(
-    archive: &TemplateArchive,
     file: &object::File<'_>,
-    origin: super::template_archive::MemberId,
     offset: usize,
     relocation: object::Relocation,
     owner: &str,
@@ -386,9 +370,15 @@ fn read_relocation(
     let RelocationTarget::Symbol(index) = relocation.target() else {
         return Err(format!("{owner}: non-symbol relocation at {offset:#x}"));
     };
-    let target = match archive.resolve_in(origin, file, index)? {
-        ResolvedSymbol::Defined(symbol) => Target::Internal(symbol),
-        ResolvedSymbol::External(name) => Target::External(name),
+    let symbol = file.symbol_by_index(index).map_err(|e| e.to_string())?;
+    let target = if matches!(symbol.section(), object::SymbolSection::Undefined) {
+        let name = symbol.name().map_err(|e| e.to_string())?;
+        if name.is_empty() {
+            return Err(format!("{owner}: unnamed template external"));
+        }
+        Target::External(name.to_owned())
+    } else {
+        Target::Internal(index)
     };
     let kind = match relocation.kind() {
         RelocationKind::Relative => Kind::Relative,
@@ -418,7 +408,7 @@ fn validate_section(section: &object::Section<'_, '_>) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "unsupported archive closure section {name:?} ({:?})",
+            "unsupported stencil section {name:?} ({:?})",
             section.kind()
         ))
     }
@@ -433,7 +423,7 @@ fn validate_relocation(relocation: &object::Relocation) -> Result<(), String> {
             | RelocationKind::Absolute
     ) {
         return Err(format!(
-            "unsupported archive relocation kind {:?} ({:?})",
+            "unsupported stencil relocation kind {:?} ({:?})",
             relocation.kind(),
             relocation.flags()
         ));
@@ -443,20 +433,20 @@ fn validate_relocation(relocation: &object::Relocation) -> Result<(), String> {
         RelocationEncoding::Generic | RelocationEncoding::X86RipRelative
     ) {
         return Err(format!(
-            "unsupported archive relocation encoding {:?}",
+            "unsupported stencil relocation encoding {:?}",
             relocation.encoding()
         ));
     }
     Ok(())
 }
 
-fn layout_closure(closure: &mut [ClosureSection]) -> Result<(), String> {
+fn layout_bundle(sections: &mut [BundleSection]) -> Result<(), String> {
     let mut offset = 0usize;
-    for section in closure {
+    for section in sections {
         let align: usize = section
             .align
             .try_into()
-            .map_err(|_| "closure alignment overflow")?;
+            .map_err(|_| "bundle alignment overflow")?;
         if !align.is_power_of_two() {
             return Err(format!(
                 "section {:?} has invalid alignment {align}",
@@ -465,36 +455,32 @@ fn layout_closure(closure: &mut [ClosureSection]) -> Result<(), String> {
         }
         offset = offset
             .checked_add(align - 1)
-            .ok_or("closure layout overflow")?
+            .ok_or("bundle layout overflow")?
             & !(align - 1);
         section.blob_offset = offset;
         offset = offset
             .checked_add(section.bytes.len())
-            .ok_or("closure layout overflow")?;
+            .ok_or("bundle layout overflow")?;
     }
     Ok(())
 }
 
 fn internal_offset(
-    archive: &TemplateArchive,
-    closure: &[ClosureSection],
-    symbol: SymbolRef,
+    file: &object::File<'_>,
+    sections: &[BundleSection],
+    symbol: SymbolIndex,
 ) -> Result<usize, String> {
-    let file = archive.file(symbol.member)?;
     let target = file
-        .symbol_by_index(symbol.symbol)
+        .symbol_by_index(symbol)
         .map_err(|e| e.to_string())?;
-    let id = SectionRef {
-        member: symbol.member,
-        section: target
-            .section_index()
-            .ok_or("internal target without section")?
-            .0,
-    };
-    let section = closure
+    let id = target
+        .section_index()
+        .ok_or("internal target without section")?
+        .0;
+    let section = sections
         .iter()
         .find(|entry| entry.id == id)
-        .ok_or_else(|| format!("internal target section {id:?} missing from closure"))?;
+        .ok_or_else(|| format!("internal target section {id:?} missing from bundle"))?;
     let within = target
         .address()
         .checked_sub(section.address)
@@ -509,21 +495,20 @@ fn internal_offset(
 }
 
 fn target_expr(
-    archive: &TemplateArchive,
-    closure: &[ClosureSection],
+    file: &object::File<'_>,
+    sections: &[BundleSection],
     external: &BTreeMap<String, usize>,
     target: &Target,
 ) -> Result<String, String> {
     let name = match target {
-        Target::External(name) => Some(name.as_str()),
+        Target::External(name) => name.as_str(),
         Target::Internal(symbol) => {
             return Ok(format!(
                 "RelocationTarget::Internal({})",
-                internal_offset(archive, closure, *symbol)?
+                internal_offset(file, sections, *symbol)?
             ));
         }
     };
-    let name = name.expect("external target has a name");
     if let Some(slot) = name.strip_prefix("BOA_JIT_CONST_") {
         let slot: usize = slot.parse().map_err(|_| "invalid constant slot")?;
         if slot > 6 {
@@ -547,11 +532,10 @@ fn kind_name(kind: Kind) -> &'static str {
 }
 
 fn emit_metadata(
-    archive: &TemplateArchive,
+    file: &object::File<'_>,
     stencils: &[Stencil],
-    closure: &[ClosureSection],
+    bundles: &[Option<StencilBundle>],
     external: &BTreeMap<String, usize>,
-    supported: &BTreeSet<usize>,
     out: &Path,
 ) -> Result<(), String> {
     let mut stencil_blob = Vec::new();
@@ -565,76 +549,17 @@ fn emit_metadata(
         "unsafe extern \"C\" {{ static BOA_JIT_EXTERNAL_SYMBOLS: [usize; {}]; }}\n\n",
         external.len()
     ));
-    for (opcode, stencil) in stencils.iter().enumerate() {
-        if !supported.contains(&opcode) {
+    for (opcode, (stencil, bundle)) in stencils.iter().zip(bundles).enumerate() {
+        let Some(bundle) = bundle else {
             generated.push_str(&format!(
                 "// opcode {opcode}: {} (unsupported)\n",
                 stencil.name
             ));
             continue;
-        }
-        // A jump table can point back into the handler. Keep that cycle in this instruction's
-        // bundle: a shared copy of the handler would have another instance's operand holes.
-        let file = archive.file(stencil.root.member)?;
-        let root = file
-            .symbol_by_index(stencil.root.symbol)
-            .map_err(|e| e.to_string())?;
-        let root_id = SectionRef {
-            member: stencil.root.member,
-            section: root.section_index().ok_or("root without section")?.0,
         };
-        let mut bundle = vec![ClosureSection {
-            id: root_id,
-            address: root.address(),
-            align: 16,
-            blob_offset: 0,
-            bytes: stencil.bytes.clone(),
-            relocations: stencil.relocations.clone(),
-        }];
-        let mut seen = BTreeSet::from([root_id]);
-        let mut index = 0;
-        while index < bundle.len() {
-            let targets: Vec<_> = bundle[index]
-                .relocations
-                .iter()
-                .filter_map(|r| match r.target {
-                    Target::Internal(symbol) => Some(symbol),
-                    _ => None,
-                })
-                .collect();
-            for target in targets {
-                let file = archive.file(target.member)?;
-                let symbol = file
-                    .symbol_by_index(target.symbol)
-                    .map_err(|e| e.to_string())?;
-                let id = SectionRef {
-                    member: target.member,
-                    section: symbol.section_index().ok_or("target without section")?.0,
-                };
-                if seen.insert(id) {
-                    bundle.push(
-                        closure
-                            .iter()
-                            .find(|section| section.id == id)
-                            .ok_or("missing instance-local section")?
-                            .clone(),
-                    );
-                }
-            }
-            index += 1;
-        }
-        layout_closure(&mut bundle)?;
-        let alignment = bundle
-            .iter()
-            .map(|section| section.align)
-            .max()
-            .unwrap_or(16)
-            .max(16);
-        if alignment > 4096 {
-            return Err("stencil alignment exceeds executable page alignment".into());
-        }
+        let alignment = bundle.alignment;
         let start = stencil_blob.len();
-        for section in &bundle {
+        for section in &bundle.sections {
             stencil_blob.resize(start + section.blob_offset, 0);
             stencil_blob.extend_from_slice(&section.bytes);
         }
@@ -642,9 +567,9 @@ fn emit_metadata(
         generated.push_str(&format!(
             "static RELOCS_{opcode:03}: &[StencilRelocation] = &[\n"
         ));
-        for section in &bundle {
+        for section in &bundle.sections {
             for relocation in &section.relocations {
-                let target = target_expr(archive, &bundle, external, &relocation.target)?;
+                let target = target_expr(file, &bundle.sections, external, &relocation.target)?;
                 generated.push_str(&format!(
                 "    StencilRelocation {{ offset: {}, addend: {}, size: {}, kind: RelocationKind::{}, target: {target} }},\n",
                 section.blob_offset + relocation.offset as usize,
@@ -664,8 +589,8 @@ fn emit_metadata(
         "pub(super) static EMITTERS: [Option<Emitter>; {0}] = [\n",
         stencils.len()
     ));
-    for opcode in 0..stencils.len() {
-        if supported.contains(&opcode) {
+    for (opcode, bundle) in bundles.iter().enumerate() {
+        if bundle.is_some() {
             generated.push_str(&format!("    Some(emit_{opcode:03}),\n"));
         } else {
             generated.push_str("    None,\n");
@@ -674,4 +599,35 @@ fn emit_metadata(
     generated.push_str("];\n");
     fs::write(out.join("jit_stencils.bin"), stencil_blob).map_err(|e| e.to_string())?;
     fs::write(out.join("jit_stencils_generated.rs"), generated).map_err(|e| e.to_string())
+}
+
+pub(super) fn read_u64_symbol(file: &object::File<'_>, name: &str) -> Result<u64, String> {
+    let symbol = file
+        .symbol_by_name(name)
+        .ok_or_else(|| format!("template object does not define {name}"))?;
+    if symbol.size() != 8 {
+        return Err(format!("{name} has size {}, expected 8", symbol.size()));
+    }
+    let section_index = symbol
+        .section_index()
+        .ok_or_else(|| format!("{name} has no section"))?;
+    let section = file
+        .section_by_index(section_index)
+        .map_err(|error| error.to_string())?;
+    let offset = symbol
+        .address()
+        .checked_sub(section.address())
+        .ok_or_else(|| format!("invalid {name} address"))? as usize;
+    let bytes: [u8; 8] = section
+        .data()
+        .map_err(|error| error.to_string())?
+        .get(offset..offset + 8)
+        .ok_or_else(|| format!("invalid {name} data range"))?
+        .try_into()
+        .map_err(|_| format!("invalid {name} value"))?;
+    Ok(if file.is_little_endian() {
+        u64::from_le_bytes(bytes)
+    } else {
+        u64::from_be_bytes(bytes)
+    })
 }
