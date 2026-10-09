@@ -7,7 +7,9 @@ use crate::{
     vm::{
         CodeBlock, CompletionRecord,
         opcode::{
-            Bytecode, InstructionIterator, JitChain, JitChainEntry, JitCodeView, OPCODE_HANDLERS,
+            Bytecode, InstructionIterator, JIT_CONTINUATION_SLOT, JIT_NEXT_PC_SLOT, JIT_PATCH_VALUE_COUNT,
+            JitChain,
+            JitChainEntry, JitCodeView, JitPatchValues, OPCODE_HANDLERS,
         },
     },
 };
@@ -166,7 +168,7 @@ struct PendingRelocation {
 pub(super) struct FunctionBuilder {
     code: Vec<u8>,
     relocations: Vec<PendingRelocation>,
-    constants: Vec<u64>,
+    patch_values: JitPatchValues,
 }
 
 impl FunctionBuilder {
@@ -174,7 +176,7 @@ impl FunctionBuilder {
         Self {
             code: Vec::new(),
             relocations: Vec::new(),
-            constants: Vec::new(),
+            patch_values: [0; JIT_PATCH_VALUE_COUNT],
         }
     }
 
@@ -215,17 +217,17 @@ impl FunctionBuilder {
                         assert!(
                             (matches!(relocation.kind, RelocationKind::Absolute)
                                 && relocation.size == 64)
-                                || (slot == 6
+                                || (slot == JIT_CONTINUATION_SLOT
                                     && matches!(
                                         relocation.kind,
                                         RelocationKind::PltRelative | RelocationKind::Relative
                                     )
                                     && relocation.size == 32)
                         );
-                        if slot == 6 {
-                            RelocationTarget::Bytecode(self.constants[5] as usize)
+                        if slot == JIT_CONTINUATION_SLOT {
+                            RelocationTarget::Bytecode(self.patch_values[JIT_NEXT_PC_SLOT] as usize)
                         } else {
-                            RelocationTarget::Value(self.constants[slot])
+                            RelocationTarget::Value(self.patch_values[slot])
                         }
                     }
                     target => target,
@@ -393,7 +395,7 @@ impl JitCode {
         let mut entries = vec![usize::MAX; bytecode.bytes.len()];
         for (pc, opcode, _) in InstructionIterator::new(bytecode) {
             if let Some(emitter) = EMITTERS[opcode as usize] {
-                builder.constants = opcode.jit_constants(&bytecode.bytes, pc);
+                builder.patch_values = opcode.jit_patch_values(&bytecode.bytes, pc);
                 entries[pc] = emitter(&mut builder)?;
             }
         }

@@ -81,10 +81,13 @@ pub(crate) trait Argument: Sized + std::fmt::Debug {
         Self::decode(bytes, pos)
     }
 
+    /// Write one operand slot; variable-sized operands reserve a zero placeholder.
+    /// The caller supplies only the operand region, keeping metadata slots protected.
     #[cfg(feature = "jit")]
     #[allow(dead_code)] // Used only by the final runtime, not the template-only build.
-    fn jit_collect(&self, values: &mut Vec<u64>) {
-        values.push(0);
+    fn jit_collect_patch_values(&self, values: &mut [u64], slot: &mut usize) {
+        values[*slot] = 0;
+        *slot += 1;
     }
 }
 
@@ -98,8 +101,9 @@ macro_rules! jit_scalar {
             (($from)(value), pos + $size)
         }
         #[cfg(feature = "jit")]
-        fn jit_collect(&self, values: &mut Vec<u64>) {
-            values.push(($to)(*self));
+        fn jit_collect_patch_values(&self, values: &mut [u64], slot: &mut usize) {
+            values[*slot] = ($to)(*self);
+            *slot += 1;
         }
     };
 }
@@ -170,7 +174,7 @@ impl<T: Argument> Argument for ThinVec<T> {
 
 impl Argument for () {
     #[cfg(feature = "jit")]
-    fn jit_collect(&self, _: &mut Vec<u64>) {}
+    fn jit_collect_patch_values(&self, _: &mut [u64], _: &mut usize) {}
     fn encode(self, _: &mut Vec<u8>) {}
 
     fn decode(_: &[u8], pos: usize) -> (Self, usize) {
@@ -227,9 +231,9 @@ macro_rules! impl_argument_for_tuple {
             }
 
             #[cfg(feature = "jit")]
-            fn jit_collect(&self, values: &mut Vec<u64>) {
+            fn jit_collect_patch_values(&self, values: &mut [u64], slot: &mut usize) {
                 let ($($i,)*) = self;
-                $($i.jit_collect(values);)*
+                $($i.jit_collect_patch_values(values, slot);)*
             }
             #[inline(always)]
             fn encode(self, bytes: &mut Vec<u8>) {

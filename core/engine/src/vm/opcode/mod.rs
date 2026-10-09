@@ -21,6 +21,26 @@ use args::{Argument, read};
 use std::ops::ControlFlow;
 use thin_vec::ThinVec;
 
+/// Maximum number of operand values stored for one compiled instruction.
+#[cfg(feature = "jit")]
+pub(crate) const JIT_OPERAND_COUNT: usize = 5;
+
+/// Slot containing the next bytecode position.
+#[cfg(feature = "jit")]
+pub(crate) const JIT_NEXT_PC_SLOT: usize = JIT_OPERAND_COUNT;
+
+/// Relocation slot for the native continuation, resolved separately from stored values.
+#[cfg(feature = "jit")]
+pub(crate) const JIT_CONTINUATION_SLOT: usize = JIT_NEXT_PC_SLOT + 1;
+
+/// Number of stored patch values, including the next bytecode position.
+#[cfg(feature = "jit")]
+pub(crate) const JIT_PATCH_VALUE_COUNT: usize = JIT_NEXT_PC_SLOT + 1;
+
+/// Operand slots and next bytecode position; the continuation has no stored array entry.
+#[cfg(feature = "jit")]
+pub(crate) type JitPatchValues = [u64; JIT_PATCH_VALUE_COUNT];
+
 #[cfg(feature = "jit")]
 pub(crate) type JitChainEntry =
     unsafe extern "C" fn(*mut Context, usize, *const JitChain, *mut ControlFlow<CompletionRecord>);
@@ -113,7 +133,7 @@ unsafe fn finish_jit_handler(
         let mut active = state.active.get();
         let changed_block = block != active.code_block;
         if !changed_block && vm.frames.len() == state.frame_depth.get() && pc == next_pc {
-            let successor = boa_jit_constant(6) as usize;
+            let successor = boa_jit_constant(JIT_CONTINUATION_SLOT as u32) as usize;
             if successor != 0 {
                 return unsafe { boa_jit_next(context, pc, chain, output) };
             }
@@ -530,18 +550,16 @@ macro_rules! generate_opcodes {
         impl Opcode {
             #[cfg(feature = "jit")]
             #[allow(unused_parens, dead_code)] // Also emitted in the template-only build.
-            pub(crate) fn jit_constants(self, bytes: &[u8], pc: usize) -> Vec<u64> {
-                let mut values = Vec::with_capacity(7);
+            pub(crate) fn jit_patch_values(self, bytes: &[u8], pc: usize) -> JitPatchValues {
+                let mut values = [0; JIT_PATCH_VALUE_COUNT];
                 let next_pc = match self {
                     $(Self::$Variant => {
                         let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
-                        args.jit_collect(&mut values);
+                        args.jit_collect_patch_values(&mut values[..JIT_OPERAND_COUNT], &mut 0);
                         next_pc
                     }),*
                 };
-                assert!(values.len() <= 5);
-                values.resize(5, 0);
-                values.push(next_pc as u64);
+                values[JIT_NEXT_PC_SLOT] = next_pc as u64;
                 values
             }
 
@@ -607,7 +625,7 @@ macro_rules! generate_opcodes {
                     if !counter.is_null() {
                         unsafe { *counter = (*counter).saturating_add(1) };
                     }
-                    let next_pc = boa_jit_constant(5) as usize;
+                    let next_pc = boa_jit_constant(JIT_NEXT_PC_SLOT as u32) as usize;
                     let result = {
                         let context = unsafe { &mut *context };
                         let bytes = &context.vm.frame().code_block.bytecode.bytes;
