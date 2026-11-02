@@ -55,6 +55,36 @@ I therefore moved stencil preparation and runtime-symbol resolution into **LLVM 
 
 The previous conformance run completed with **all tests (passed by main branch) passing**.
 
+### Main Branch
+
+```text
+Results (ECMAScript Next):
+Total tests: 53578
+Passed tests: 51450
+Ignored tests: 1648
+Failed tests: 480 (0 panics)
+Conformance: 96.03%
+
+real    1m37.817s
+user    10m0.042s
+sys     0m23.278s
+```
+
+### JIT Branch
+
+```text
+Results (ECMAScript Next):
+Total tests: 53578
+Passed tests: 51450
+Ignored tests: 1648
+Failed tests: 480 (0 panics)
+Conformance: 96.03%
+
+real    2m59.997s
+user    12m34.439s
+sys     3m49.552s
+```
+
 ## Benchmark: `simple-loop.js`
 
 The committed [`simple-loop.js`](https://github.com/zhuzhu81998/boa/blob/2121ac386e6748dee78476aaa2e3a882dc6bd3e6/simple-loop.js) runs two nested loops of 32,767 iterations, calling `addOne` **1,073,676,289 times**. Each timed run must print `1073676289`.
