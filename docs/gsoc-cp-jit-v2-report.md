@@ -15,13 +15,21 @@ The main contribution is establishing which approach works for Boa's Rust implem
 
 ## Technical Implementation Details
 
+### Initial Research and Toy Project Experiments
+
+I started with a small, controlled toy project before integrating anything into Boa. The experiment involved copying and connecting a few native stencils and patching their references to see whether the approach worked. This kept the initial investigation separate from the complexity of JavaScript execution and garbage collection.
+
+I investigated LuaJIT, CPython, Rust copy-and-patch prototypes, other Rust JIT approaches, and Cranelift as an alternative to LLVM. Much of the work involved understanding these different designs and which assumptions could carry over to Boa.
+
+A Rust copy-and-patch example is [Patchouly](https://github.com/gudzpoz/patchouly). Its stencil extractor rejects references to functions or data defined in the object, while allowing explicitly supplied function pointers and allowlisted runtime symbols. Boa needs automatic symbol handling as much as possible, since opcode handlers depend on many runtime helpers, including compiler-generated drop glue associated with garbage-collected values. Those helpers may be private functions in the same executable, making manual registration impractical. The toy experiments established the basic feasibility of stencil composition, while the broader investigation identified automatic runtime dependency resolution as an essential requirement. These findings led to the LLVM IR approach described below.
+
 ### Phase 1: Stencil Generation and Runtime Linking
 
-**Investigating CPython's Approach:** We investigated [CPython's copy-and-patch JIT](https://peps.python.org/pep-0744/) as a reference. Its build pipeline compiles generated C micro-op templates with Clang, extracts native code and relocations, and generates C emitters and a runtime symbol-address table in C. See CPython's  [JIT tool](https://github.com/python/cpython/blob/main/Tools/jit).
+**Investigating CPython's Approach:** I investigated [CPython's copy-and-patch JIT](https://peps.python.org/pep-0744/) as a reference. Its build pipeline compiles generated C micro-op templates with Clang, extracts native code and relocations, and generates C emitters and a runtime symbol-address table in C. See CPython's  [JIT tool](https://github.com/python/cpython/blob/main/Tools/jit).
 
 **Adapting the Design to Rust:** CPython's C implementation can refer to runtime helpers through C declarations and linkable names in C, without Rust's mangled names and more. C still has linkage and visibility constraints, and CPython explicitly handles platform symbol conventions and relocations. Boa adds the challenge of preserving access to compiler-generated private functions, drop glue, and globals that cannot simply be named from separately generated Rust source.
 
-We therefore moved stencil preparation and runtime-symbol resolution into **LLVM IR**, where function types, calling conventions, and internal definitions are available directly. The pipeline replaces dependencies with numbered holes and inserts their address table into the actual runtime module before linking can discard private definitions. This preserves exact mangled identities rather than reconstructing names or making every helper public. Native object extraction and runtime machine-code patching remain later stages. LLVM is used during the build, not to compile JavaScript at runtime.
+I therefore moved stencil preparation and runtime-symbol resolution into **LLVM IR**, where function types, calling conventions, and internal definitions are available directly. The pipeline replaces dependencies with numbered holes and inserts their address table into the actual runtime module before linking can discard private definitions. This preserves exact mangled identities rather than reconstructing names or making every helper public. Native object extraction and runtime machine-code patching remain later stages. LLVM is used during the build, not to compile JavaScript at runtime.
 
 **Problem:** Extracted handlers reference private Rust helpers, constants, and thread-local data. Their addresses must resolve to the actual runtime definitions, and private symbol names cannot be reliably assumed to match across independent compilations.
 
