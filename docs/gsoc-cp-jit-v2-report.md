@@ -25,7 +25,7 @@ A Rust copy-and-patch example is [Patchouly](https://github.com/gudzpoz/patchoul
 
 ### Phase 1: Stencil Generation and Runtime Linking
 
-**Investigating CPython's Approach:** I investigated [CPython's copy-and-patch JIT](https://peps.python.org/pep-0744/) as a reference. Its build pipeline compiles generated C micro-op templates with Clang, extracts native code and relocations, and generates C emitters and a runtime symbol-address table in C. See CPython's  [JIT tool](https://github.com/python/cpython/blob/main/Tools/jit).
+**CPython Specialties:** I investigated [CPython's copy-and-patch JIT](https://peps.python.org/pep-0744/) as a reference. Its build pipeline compiles generated C micro-op templates with Clang, extracts native code and relocations, and generates C emitters and a runtime symbol-address table in C. See CPython's  [JIT tool](https://github.com/python/cpython/blob/main/Tools/jit).
 
 **Adapting the Design to Rust:** CPython's C implementation can refer to runtime helpers through C declarations and linkable names in C, without Rust's mangled names and more. C still has linkage and visibility constraints, and CPython explicitly handles platform symbol conventions and relocations. Boa adds the challenge of preserving access to compiler-generated private functions, drop glue, and globals that cannot simply be named from separately generated Rust source.
 
